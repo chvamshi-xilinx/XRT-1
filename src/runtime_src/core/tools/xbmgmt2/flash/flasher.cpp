@@ -103,6 +103,17 @@ int Flasher::upgradeFirmware(const std::string& flasherType,
     {
     case SPI:
     {
+	// program icap controller for webstar flow. Required only for U.2
+        try {
+	    auto enable_icap_controller = xrt_core::device_query<xrt_core::query::icap_controller_enable>(m_device);
+	    std::cout<<"enable_icap_controller "<<enable_icap_controller<<std::endl;
+	    xrt_core::device_update<xrt_core::query::icap_controller_enable>(m_device.get(), 1);
+	}
+	catch (...)
+	{
+		std::cout<<"unable to write "<<std::endl;
+	}
+	break;
         XSPI_Flasher xspi(m_device);
         if (primary == nullptr)
         {
@@ -116,7 +127,8 @@ int Flasher::upgradeFirmware(const std::string& flasherType,
         {
             retVal = xspi.xclUpgradeFirmware2(*primary, *secondary);
         }
-        break;
+
+	break;
     }
     case BPI:
     {

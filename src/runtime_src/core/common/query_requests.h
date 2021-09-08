@@ -84,6 +84,8 @@ enum class key_type
   ps_kernel,
   xocl_errors,
   xclbin_full,
+  icap_controller_enable,
+
 
   xmc_version,
   xmc_board_name,
@@ -720,6 +722,19 @@ struct xclbin_full : request
 
   virtual boost::any
   get(const device*) const = 0;
+};
+
+struct icap_controller_enable: request
+{
+  using result_type = uint32_t;  // get value type
+  using value_type = uint32_t;   // put value type
+  static const key_type key = key_type::icap_controller_enable;
+
+  virtual boost::any
+  get(const device*) const = 0;
+  
+  virtual void
+  put(const device*, const boost::any&) const = 0;
 };
 
 struct aie_metadata : request
