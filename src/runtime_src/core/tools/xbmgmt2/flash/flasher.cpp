@@ -120,7 +120,7 @@ int Flasher::upgradeFirmware(const std::string& flasherType,
 	// program icap controller for webstar flow. Required only for U.2
         try {
 	    uint32_t enable = 1;
-	    xrt_core::device_update<xrt_core::query::icap_controller_enable>(m_device.get(), enable);
+	    xrt_core::device_update<xrt_core::query::ic_enable>(m_device.get(), enable);
         } catch (...) {}
 
 	break;

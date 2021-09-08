@@ -84,7 +84,8 @@ enum class key_type
   ps_kernel,
   xocl_errors,
   xclbin_full,
-  icap_controller_enable,
+  ic_enable,
+  ic_load_flash_address,
 
 
   xmc_version,
@@ -724,11 +725,24 @@ struct xclbin_full : request
   get(const device*) const = 0;
 };
 
-struct icap_controller_enable: request
+struct ic_enable: request
 {
-  using result_type = uint32_t;  // get value type
-  using value_type = uint32_t;   // put value type
-  static const key_type key = key_type::icap_controller_enable;
+  using result_type = uint32_t;
+  using value_type = uint32_t;
+  static const key_type key = key_type::ic_enable;
+
+  virtual boost::any
+  get(const device*) const = 0;
+  
+  virtual void
+  put(const device*, const boost::any&) const = 0;
+};
+
+struct ic_load_flash_address: request
+{
+  using result_type = uint32_t;
+  using value_type = uint32_t;
+  static const key_type key = key_type::ic_load_flash_address;
 
   virtual boost::any
   get(const device*) const = 0;
