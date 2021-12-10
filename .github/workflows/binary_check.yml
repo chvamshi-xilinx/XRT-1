@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+    - name: Timeout test
+      run: |
+         chmod +x "${GITHUB_WORKSPACE}/.github/timeout_test.sh"
+         "${GITHUB_WORKSPACE}/.github/timeout_test.sh"
     - name: Install Dependencies
       run: |
         sudo apt update
