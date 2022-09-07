@@ -194,7 +194,8 @@ bdf2index(const std::string& bdfstr, bool _inUserDomain)
   else
     dev = static_cast<uint16_t>(std::stoi(std::string(tokens[0]), nullptr, radix));
 
-  bus = static_cast<uint16_t>(std::stoi(std::string(tokens[1]), nullptr, radix));
+  if(tokens.size() > 1 )
+    bus = static_cast<uint16_t>(std::stoi(std::string(tokens[1]), nullptr, radix));
 
   // domain is not mandatory if it is "0000"
   if(tokens.size() > 2)
