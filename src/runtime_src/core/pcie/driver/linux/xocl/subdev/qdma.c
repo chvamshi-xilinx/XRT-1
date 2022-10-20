@@ -697,7 +697,12 @@ static void qdma_isr(unsigned long dma_handle, int irq, unsigned long arg)
 
 	irq_entry = &qdma->user_msix_table[irq];
 	if (irq_entry->in_use)
-		irq_entry->handler(irq, irq_entry->arg);
+	{
+		if(irq_entry->handler)
+			irq_entry->handler(irq, irq_entry->arg);
+		else
+			xocl_info(&qdma->pdev->dev, "no handler registered for irq %d ", irq);
+	}
 	else
 		xocl_info(&qdma->pdev->dev, "user irq %d not in use", irq);
 }
