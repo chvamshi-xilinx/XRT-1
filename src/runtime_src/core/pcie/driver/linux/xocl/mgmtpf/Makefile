@@ -66,6 +66,7 @@ xclmgmt-y := \
 	../subdev/dna.o \
 	../subdev/fmgr.o \
 	../subdev/mgmt_msix.o \
+	../subdev/msix_qdma.o \
 	../subdev/flash.o \
 	../subdev/iores.o \
 	../subdev/axigate.o \
@@ -81,6 +82,7 @@ xclmgmt-y := \
 	../subdev/version_ctrl.o \
 	../subdev/pcie_firewall.o \
 	../subdev/hwmon_sdm.o \
+	$(xocl_lib-y) \
 	$(drv_common-y) \
 	mgmt-core.o \
 	mgmt-cw.o \
@@ -98,7 +100,12 @@ PWD	:= $(shell pwd)
 ROOT	:= $(dir $(M))
 XILINXINCLUDE := -I$(ROOT)/../include -I$(ROOT)/../../../../include -I$(ROOT)/../../../../common/drv/include
 
+
 ccflags-y += $(XILINXINCLUDE) -DPF=MGMTPF
+
+QDMA_PATH := $(src)/../lib/libqdma/QDMA/linux-kernel/driver/libqdma/
+ccflags-y += -I$(QDMA_PATH) -I$(QDMA_PATH)/qdma_access/ -I$(QDMA_PATH)/qdma_access/qdma_soft_access/ -I$(QDMA_PATH)/qdma_access/eqdma_soft_access -I$(QDMA_PATH)/qdma_access/qdma_cpm4_access/ -I$(QDMA_PATH)/qdma_access/eqdma_cpm5_access/
+
 ifeq ($(DEBUG),1)
 ccflags-y += -DDEBUG
 endif
