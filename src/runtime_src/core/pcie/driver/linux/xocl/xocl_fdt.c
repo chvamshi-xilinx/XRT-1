@@ -364,6 +364,19 @@ static struct xocl_subdev_map subdev_map[] = {
 	},
 	{
 		.id = XOCL_SUBDEV_DMA,
+		.dev_name = XOCL_QDMA_MSIX,
+		.res_array = (struct xocl_subdev_res[]) {
+			{.res_name = NODE_MSIX_QDMA_MGMT},
+			{NULL},
+		},
+		.required_ip = 1,
+		.flags = 0,
+		.build_priv_data = msix_build_priv,
+		.devinfo_cb = NULL,
+		.max_level = XOCL_SUBDEV_LEVEL_PRP,
+	},
+	{
+		.id = XOCL_SUBDEV_DMA,
 		.dev_name = XOCL_QDMA,
 		.res_array = (struct xocl_subdev_res[]) {
 			{.res_name = NODE_QDMA},
