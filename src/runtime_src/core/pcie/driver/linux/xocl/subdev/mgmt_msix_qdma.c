@@ -187,7 +187,7 @@ static int msix_qdma_probe(struct platform_device *pdev)
 	for (i = 0, res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 		res;
 		res = platform_get_resource(pdev, IORESOURCE_MEM, ++i)) {
-		if (!strncmp(res->name, NODE_QDMA, strlen(NODE_QDMA))) {
+		if (!strncmp(res->name, NODE_MSIX_QDMA_MGMT, strlen(NODE_MSIX_QDMA_MGMT))) {
 			ret = xocl_ioaddr_to_baroff(xdev, res->start, &dma_bar,
 							NULL);
 			if (ret) {
@@ -307,7 +307,7 @@ static struct platform_driver	mgmt_msix_qdma_driver = {
 	.probe		= msix_qdma_probe,
 	.remove		= msix_qdma_remove,
 	.driver		= {
-		.name = XOCL_DEVNAME(XOCL_QDMA_MSIX),
+		.name = "mgmt_msix_qdma",
 	},
 	.id_table	= msix_qdma_id_table,
 };
