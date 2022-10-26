@@ -2638,6 +2638,9 @@ void xocl_fini_fmgr(void);
 int __init xocl_init_mgmt_msix(void);
 void xocl_fini_mgmt_msix(void);
 
+int __init xocl_init_mgmt_msix_qdma(void);
+void xocl_fini_mgmt_msix_qdma(void);
+
 int __init xocl_init_flash(void);
 void xocl_fini_flash(void);
 
@@ -2727,9 +2730,6 @@ void xocl_fini_version_control(void);
 
 int __init xocl_init_msix_xdma(void);
 void xocl_fini_msix_xdma(void);
-
-int __init xocl_init_msix_qdma(void);
-void xocl_fini_msix_qdma(void);
 
 int __init xocl_init_ert_user(void);
 void xocl_fini_ert_user(void);

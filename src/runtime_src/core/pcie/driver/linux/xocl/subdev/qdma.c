@@ -779,8 +779,11 @@ static int qdma_probe(struct platform_device *pdev)
 		res;
 		res = platform_get_resource(pdev, IORESOURCE_MEM, ++i)) {
 		if (!strncmp(res->name, NODE_QDMA, strlen(NODE_QDMA))) {
+            printk("+++ Resource start is %x \n",res->start);
+            printk("+++ Resource end is %x \n",res->end);
 			ret = xocl_ioaddr_to_baroff(xdev, res->start, &dma_bar,
 							NULL);
+            printk("+++ dma bar is %x \n",dma_bar);
 			if (ret) {
 				xocl_err(&pdev->dev,
 					"Invalid resource %pR", res);

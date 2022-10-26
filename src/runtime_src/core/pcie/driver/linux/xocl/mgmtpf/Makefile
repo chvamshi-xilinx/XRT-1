@@ -66,7 +66,7 @@ xclmgmt-y := \
 	../subdev/dna.o \
 	../subdev/fmgr.o \
 	../subdev/mgmt_msix.o \
-	../subdev/msix_qdma.o \
+	../subdev/mgmt_msix_qdma.o \
 	../subdev/flash.o \
 	../subdev/iores.o \
 	../subdev/axigate.o \

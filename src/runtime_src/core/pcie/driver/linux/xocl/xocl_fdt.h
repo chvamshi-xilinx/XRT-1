@@ -81,6 +81,7 @@
 #define NODE_MSIX_MGMT "ep_msix_mgmt_00"
 #define NODE_QDMA "ep_qdma_00"
 #define NODE_QDMA_CSR "ep_qdma4_csr_00"
+#define NODE_MSIX_QDMA_MGMT "ep_msix_qdma_mgmt_00"
 #define NODE_CLK_SHUTDOWN "ep_aclk_shutdown_00"
 #define NODE_ERT_BASE "ep_ert_base_address_00"
 #define NODE_ERT_RESET "ep_ert_reset_00"

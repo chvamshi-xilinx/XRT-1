@@ -270,6 +270,7 @@ enum {
 #define	XOCL_ICAP_CNTRL		"icap_controller"
 #define	XOCL_VERSION_CTRL	"version_control"
 #define	XOCL_MSIX_XDMA		"msix_xdma"
+#define XOCL_MSIX_QDMA "msix_qdma"
 #define	XOCL_ERT_USER		"ert_user"
 #define	XOCL_M2M		"m2m"
 #define	XOCL_PCIE_FIREWALL	"pcie_firewall"

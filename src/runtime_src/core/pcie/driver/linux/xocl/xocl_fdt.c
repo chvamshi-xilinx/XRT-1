@@ -46,7 +46,11 @@ static void *msix_build_priv(xdev_handle_t xdev_hdl, void *subdev, size_t *len)
 	node = fdt_path_offset(blob, "/" NODE_ENDPOINTS "/" NODE_MSIX);
 	if (node < 0)
 		node = fdt_path_offset(blob, "/" NODE_ENDPOINTS "/" NODE_MSIX_MGMT);
-	if (node < 0) {
+	
+    if (node < 0)
+		node = fdt_path_offset(blob, "/" NODE_ENDPOINTS "/" NODE_MSIX_QDMA_MGMT);
+	
+    if (node < 0) {
 		xocl_xdev_err(xdev_hdl, "did not find msix node in %s", NODE_ENDPOINTS);
 		return NULL;
 	}

@@ -184,6 +184,7 @@ SET (XRT_DKMS_DRIVER_SRCS
   xocl/subdev/dna.c
   xocl/subdev/fmgr.c
   xocl/subdev/mgmt_msix.c
+  xocl/subdev/mgmt_msix_qdma.c
   xocl/subdev/flash.c
   xocl/subdev/mailbox_versal.c
   xocl/subdev/ospi_versal.c
