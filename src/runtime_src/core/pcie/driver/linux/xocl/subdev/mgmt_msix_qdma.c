@@ -42,7 +42,7 @@ MODULE_PARM_DESC(interrupt_mode, "0:auto, 1:poll, 2:direct, 3:intr_ring, default
 
 
 
-struct qdma_irq {
+struct mgmt_msix_irq {
 	struct eventfd_ctx	*event_ctx;
 	bool			    in_use;
 	bool			    enabled;
@@ -50,19 +50,22 @@ struct qdma_irq {
 	void			    *arg;
 };
 
-struct xocl_qdma {
+struct xocl_mgmt_msix_qdma {
 	unsigned long 		    dma_hndl;
 	struct qdma_dev_conf	dev_conf;
 	struct platform_device	*pdev;
-	struct qdma_irq		    user_msix_table[QDMA_MAX_INTR];
+	struct mgmt_msix_irq    user_msix_table[QDMA_MAX_INTR];
 	u32			            user_msix_mask;
+    u32                     msix_user_start_vector;
 	spinlock_t		        user_msix_table_lock;
+	struct xocl_msix_privdata *privdata;
+    
 };
 
 static int user_intr_register(struct platform_device *pdev, u32 intr,
 	irq_handler_t handler, void *arg, int event_fd)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_mgmt_msix_qdma *qdma;
 	struct eventfd_ctx *trigger = ERR_PTR(-EINVAL);
 	unsigned long flags;
 	int ret;
@@ -110,7 +113,7 @@ failed:
 
 static int user_intr_unreg(struct platform_device *pdev, u32 intr)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_mgmt_msix_qdma *qdma;
 	unsigned long flags;
 	int ret;
 
@@ -148,8 +151,8 @@ static int user_intr_config(struct platform_device *pdev, u32 intr, bool en)
 
 static void qdma_isr(unsigned long dma_handle, int irq, unsigned long arg)
 {
-	struct xocl_qdma *qdma = (struct xocl_qdma *)arg;
-	struct qdma_irq *irq_entry;
+	struct xocl_mgmt_msix_qdma *qdma = (struct xocl_mgmt_msix_qdma *)arg;
+	struct mgmt_msix_irq *irq_entry;
 
 	irq_entry = &qdma->user_msix_table[irq];
 	if (irq_entry->in_use)
@@ -166,23 +169,24 @@ static struct xocl_msix_funcs msix_qdma_ops = {
 
 static int msix_qdma_probe(struct platform_device *pdev)
 {
-	struct xocl_qdma *qdma = NULL;
+	struct xocl_mgmt_msix_qdma *mgmt_msix = NULL;
 	struct qdma_dev_conf *conf;
 	xdev_handle_t	xdev;
 	struct resource *res = NULL;
 	int	i, ret = 0, dma_bar = -1;
+    u32 total = 0;
 
 	xdev = xocl_get_xdev(pdev);
 
-	qdma = xocl_drvinst_alloc(&pdev->dev, sizeof(*qdma));
-	if (!qdma) {
+	mgmt_msix = xocl_drvinst_alloc(&pdev->dev, sizeof(*mgmt_msix));
+	if (!mgmt_msix) {
 		xocl_err(&pdev->dev, "alloc mm dev failed");
 		ret = -ENOMEM;
 		goto failed;
 	}
 
-	qdma->pdev = pdev;
-	platform_set_drvdata(pdev, qdma);
+	mgmt_msix->pdev = pdev;
+	platform_set_drvdata(pdev, mgmt_msix);
 
 	for (i = 0, res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 		res;
@@ -206,6 +210,16 @@ static int msix_qdma_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+	mgmt_msix->privdata = XOCL_GET_SUBDEV_PRIV(&pdev->dev);
+	if (mgmt_msix->privdata) {
+		mgmt_msix->msix_user_start_vector = mgmt_msix->privdata->start;
+		total = mgmt_msix->privdata->total;
+	} else {
+		mgmt_msix->msix_user_start_vector = 1;
+		total = 16;
+	}
+    
+
 	conf = &qdma->dev_conf;
 	memset(conf, 0, sizeof(*conf));
 	conf->pdev = XDEV(xdev)->pdev;
@@ -216,7 +230,7 @@ static int msix_qdma_probe(struct platform_device *pdev)
 	conf->bar_num_user = -1;
 	conf->bar_num_bypass = -1;
 	conf->data_msix_qvec_max = 1;
-	conf->user_msix_qvec_max = 16;
+	conf->user_msix_qvec_max = total;
 	conf->msix_qvec_max = 32;
 	conf->qdma_drv_mode = qdma_interrupt_mode;
 
@@ -259,9 +273,9 @@ failed:
 
 static int msix_qdma_remove(struct platform_device *pdev)
 {
-	struct xocl_qdma *qdma= platform_get_drvdata(pdev);
+	struct xocl_mgmt_msix_qdma *qdma= platform_get_drvdata(pdev);
 	xdev_handle_t xdev;
-	struct qdma_irq *irq_entry;
+	struct mgmt_msix_irq *irq_entry;
 	void *hdl;
 	int i;
 
