@@ -220,7 +220,7 @@ static int msix_qdma_probe(struct platform_device *pdev)
 	}
     
 
-	conf = &qdma->dev_conf;
+	conf = &mgmt_msix->dev_conf;
 	memset(conf, 0, sizeof(*conf));
 	conf->pdev = XDEV(xdev)->pdev;
 	conf->master_pf = 1;
@@ -235,35 +235,35 @@ static int msix_qdma_probe(struct platform_device *pdev)
 	conf->qdma_drv_mode = qdma_interrupt_mode;
 
 	conf->fp_user_isr_handler = (void*)qdma_isr;
-	conf->uld = (unsigned long)qdma;
+	conf->uld = (unsigned long)mgmt_msix;
 
 	xocl_info(&pdev->dev, "dma %d, mode 0x%x.\n",
 		dma_bar, conf->qdma_drv_mode);
-	ret = qdma_device_open(XOCL_MODULE_NAME, conf, &qdma->dma_hndl);
+	ret = qdma_device_open(XOCL_MODULE_NAME, conf, &mgmt_msix->dma_hndl);
 	if (ret < 0) {
 		xocl_err(&pdev->dev, "QDMA Device Open failed");
 		goto failed;
 	}
 
-	ret = qdma_device_get_config(qdma->dma_hndl, &qdma->dev_conf, NULL, 0);
+	ret = qdma_device_get_config(mgmt_msix->dma_hndl, &mgmt_msix->dev_conf, NULL, 0);
 	if (ret) {
 		xocl_err(&pdev->dev, "Failed to get device info");
 		goto failed;
 	}
 
-	qdma->user_msix_mask = QDMA_USER_INTR_MASK;
+	mgmt_msix->user_msix_mask = QDMA_USER_INTR_MASK;
 
-	spin_lock_init(&qdma->user_msix_table_lock);
+	spin_lock_init(&mgmt_msix->user_msix_table_lock);
 
 	return 0;
 
 failed:
-	if (qdma) {
+	if (mgmt_msix) {
 
-		if (qdma->dma_hndl)
-			qdma_device_close(XDEV(xdev)->pdev, qdma->dma_hndl);
+		if (mgmt_msix->dma_hndl)
+			qdma_device_close(XDEV(xdev)->pdev, mgmt_msix->dma_hndl);
 
-		xocl_drvinst_release(qdma, NULL);
+		xocl_drvinst_release(mgmt_msix, NULL);
 	}
 
 	platform_set_drvdata(pdev, NULL);
