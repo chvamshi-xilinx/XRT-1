@@ -305,11 +305,13 @@ public:
 
 // Statically allocated kds_device object for each core deviced
 static std::map<const xrt_core::device*, std::unique_ptr<kds_device>> kds_devices;
+static std::mutex kds_devices_mutex;
 
 // Get or create kds_device object from core device
 static kds_device*
 get_kds_device(xrt_core::device* device)
 {
+  std::lock_guard<std::mutex> lk(kds_devices_mutex);
   auto itr = kds_devices.find(device);
   if (itr != kds_devices.end())
     return (*itr).second.get();
@@ -323,6 +325,7 @@ get_kds_device(xrt_core::device* device)
 static kds_device*
 get_kds_device_or_error(const xrt_core::device* device)
 {
+  std::lock_guard<std::mutex> lk(kds_devices_mutex);
   auto itr = kds_devices.find(device);
   if (itr == kds_devices.end())
     throw std::runtime_error("internal error: missing kds device");
@@ -402,6 +405,7 @@ start()
 void
 stop()
 {
+  std::lock_guard<std::mutex> lk(kds_devices_mutex);
   kds_devices.clear();
 }
 
@@ -411,6 +415,15 @@ void
 init(xrt_core::device* device)
 {
   get_kds_device(device);
+}
+
+void
+finish(xrt_core::device* device)
+{
+  std::lock_guard<std::mutex> lk(kds_devices_mutex);
+  auto itr = kds_devices.find(device);
+  if(itr != kds_devices.end())
+     kds_devices.erase(itr);
 }
 
 }} // kds,xrt_core

@@ -315,6 +315,7 @@ struct device_type
   ~device_type()
   {
     XRT_DEBUGF("device_type::~device_type(%d)\n", uid);
+    xrt_core::exec::finish(core_device.get());
   }
 
   device_type(const device_type&) = delete;

@@ -908,4 +908,11 @@ init(xrt_core::device* xdev)
      (xdev,std::make_unique<exec_core>(xdev,&s_global_scheduler,slots,amap)));
 }
 
+void finish(xrt_core::device* xdev)
+{
+  auto itr = s_device_exec_core.find(xdev);
+  if( itr != s_device_exec_core.end())
+    s_device_exec_core.erase(itr);
+}
+
 }} // sws,xrt
