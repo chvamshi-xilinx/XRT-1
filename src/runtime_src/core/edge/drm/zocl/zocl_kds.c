@@ -868,6 +868,9 @@ int zocl_create_client(struct device *dev, void **client_hdl)
 		goto out;
 	}
 
+	/* Initializing hw context list */
+        INIT_LIST_HEAD(&client->hw_ctx_list);
+
 	/* Multiple context can be active. Initializing context list */
 	INIT_LIST_HEAD(&client->ctx_list);
 

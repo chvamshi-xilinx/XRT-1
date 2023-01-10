@@ -770,6 +770,8 @@ kds_del_cu_context(struct kds_sched *kds, struct kds_client *client,
 	struct kds_cu_mgmt *cu_mgmt = NULL;
 	u32 cu_idx = cu_ctx->cu_idx;
 	int domain = cu_ctx->cu_domain;
+	if(!cu_ctx->hw_ctx)
+		return 0;
 	uint32_t hw_ctx = cu_ctx->hw_ctx->hw_ctx_idx;
 	unsigned long submitted;
 	unsigned long completed;
