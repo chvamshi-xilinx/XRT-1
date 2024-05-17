@@ -50,6 +50,7 @@ public:
     std::string get_sysfs_path(const std::string& entry);
 
     static zynq_device *get_dev();
+    ~zynq_device();
 private:
     std::fstream sysfs_open(const std::string& entry, std::string& err,
         bool write = false, bool binary = false);

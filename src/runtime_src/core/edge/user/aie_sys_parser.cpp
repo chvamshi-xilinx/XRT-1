@@ -20,34 +20,35 @@
 
 #include <filesystem>
 
-std::fstream aie_sys_parser::sysfs_open_path(const std::string& path,
-                                             bool write, bool binary)
-{   
+std::fstream
+aie_sys_parser::sysfs_open_path(const std::string& path, bool write, bool binary) const
+{
     std::fstream fs;
     std::ios::openmode mode = write ? std::ios::out : std::ios::in;
-    
-    if (binary) 
+
+    if (binary)
         mode |= std::ios::binary;
-    
+
     fs.open(path, mode);
     if (!fs.is_open()) {
-        throw std::runtime_error(boost::str(boost::format("Failed to open %s for %s %s: (%d) %s") 
-            % path 
-            % (binary ? "binary " : "") 
-            % (write ? "writing" : "reading") 
+        throw std::runtime_error(boost::str(boost::format("Failed to open %s for %s %s: (%d) %s")
+            % path
+            % (binary ? "binary " : "")
+            % (write ? "writing" : "reading")
             % errno
             % strerror(errno)));
     }
     return fs;
 }
 
-std::fstream aie_sys_parser::sysfs_open(const std::string& entry,
-                                        bool write, bool binary)
+std::fstream
+aie_sys_parser::sysfs_open(const std::string& entry,bool write, bool binary) const
 {
     return sysfs_open_path(entry, write, binary);
 }
 
-void aie_sys_parser::sysfs_get(const std::string& entry, std::vector<std::string>& sv)
+void
+aie_sys_parser::sysfs_get(const std::string& entry, std::vector<std::string>& sv) const
 {
     sv.clear();
     std::fstream fs = sysfs_open(entry, false, false);
@@ -88,10 +89,9 @@ Function parse the above input content for given row and column and generate abo
 Input is in non-standard format, where ':', '|', and "," are the delimiters.
 */
 void
-aie_sys_parser::addrecursive(const int col, const int row, const std::string& tag, const std::string& line,
-    boost::property_tree::ptree &pt)
+aie_sys_parser::addrecursive(const int col, const int row, const std::string& tag, const std::string& line, boost::property_tree::ptree &pt) const
 {
-    std::string n(tag); 
+    std::string n(tag);
     boost::property_tree::ptree value;
     int start_index = 0;
     int end_index = 0;
@@ -144,9 +144,9 @@ aie_sys_parser::addrecursive(const int col, const int row, const std::string& ta
  * If present, reads and parse the content of each sysfs.
  */
 boost::property_tree::ptree
-aie_sys_parser::aie_sys_read(const int col, const int row)
+aie_sys_parser::aie_sys_read(const int col, const int row) const
 {
-    const static std::vector<std::string> tags{"core","dma","lock","errors","event","bd"};
+    const std::vector<std::string> tags{"core","dma","lock","errors","event","bd"};
     std::vector<std::string> data;
     boost::property_tree::ptree pt;
     for(auto& tag:tags) {
@@ -157,16 +157,9 @@ aie_sys_parser::aie_sys_read(const int col, const int row)
                 addrecursive(col,row,tag,line,pt);
         }
     }
-    return pt;	
+    return pt;
 }
 
-aie_sys_parser *aie_sys_parser::get_parser(const std::string& aiepart)
-{
-    const std::string sroot = "/sys/class/aie/aiepart_" + aiepart + "/";
-    static aie_sys_parser dev(sroot);
-    return &dev;
-}
-
-aie_sys_parser::aie_sys_parser(const std::string& root) : sysfs_root(root)
+aie_sys_parser::aie_sys_parser(const std::string& root) : sysfs_root("/sys/class/aie/aiepart_" + root + "/")
 {
 }

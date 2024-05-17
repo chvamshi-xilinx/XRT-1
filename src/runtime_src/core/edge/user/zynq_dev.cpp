@@ -20,6 +20,20 @@
 #include <filesystem>
 #include <regex>
 #include "zynq_dev.h"
+#include "plugin/xdp/hal_profile.h"
+#include "plugin/xdp/aie_profile.h"
+#include "plugin/xdp/aie_status.h"
+
+#ifndef __HWEM__
+#include "plugin/xdp/hal_api_interface.h"
+#include "plugin/xdp/hal_device_offload.h"
+
+#include "plugin/xdp/aie_trace.h"
+#else
+#include "plugin/xdp/hw_emu_device_offload.h"
+#endif
+
+
 
 static std::fstream sysfs_open_path(const std::string& path, std::string& err,
     bool write, bool binary)
@@ -63,6 +77,14 @@ void zynq_device::sysfs_put(const std::string& entry, std::string& err_msg,
     fs << input;
 }
 
+zynq_device::~zynq_device()
+{
+	#ifndef __HWEM__
+  xdp::aie::finish_flush_device(this);
+#endif
+  xdp::aie::ctr::end_poll(this);
+  xdp::aie::sts::end_poll(this);
+}
 void zynq_device::sysfs_put(const std::string& entry, std::string& err_msg,
     const std::vector<char>& buf)
 {
