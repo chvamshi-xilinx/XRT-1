@@ -37,14 +37,14 @@ class Aied
 public:
   Aied(xrt_core::device* device);
   ~Aied();
-  void registerGraph(const graph_type *graph);
-  void deregisterGraph(const graph_type *graph);
+  void registerGraph(const graph_instance *graph);
+  void deregisterGraph(const graph_instance *graph);
 
 private:
   bool done;
   static void* pollAIE(void *arg);
   xrt_core::device *mCoreDevice;
-  std::vector<const graph_type*> mGraphs;
+  std::vector<const graph_instance*> mGraphs;
   pthread_t ptid;
 };
 } // end namespace

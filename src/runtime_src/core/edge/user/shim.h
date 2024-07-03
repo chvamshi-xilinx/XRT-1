@@ -237,7 +237,7 @@ public:
     std::unique_ptr<xrt_core::graph_handle>
     open_graph_handle(const char* name, xrt::graph::access_mode am) override
     {
-      return std::make_unique<graph_object>(m_shim, m_uuid, name, am);
+      return std::make_unique<graph_object>(m_shim, m_uuid, name, am, this);
     }
   }; // class hwcontext
 
@@ -245,85 +245,198 @@ public:
   class graph_object : public xrt_core::graph_handle
   {
     shim* m_shim;
-    xclGraphHandle m_xclGraphHandle;
+    std::unique_ptr<zynqaie::graph_instance> m_graphInstance;
 
   public:
-    graph_object(shim* shim, const xrt::uuid& uuid , const char* name, xrt::graph::access_mode am)
-      : m_shim{shim},
-        m_xclGraphHandle{xclGraphOpen(m_shim, uuid.get(), name, am)}
-    {}
-
-    ~graph_object()
+    graph_object(shim* shim, const xrt::uuid& uuid , const char* name,
+                    xrt::graph::access_mode am, const xrt_core::hwctx_handle* hw_handle = nullptr)
+      : m_shim{shim}
     {
-       xclGraphClose(m_xclGraphHandle);
+      auto device{xrt_core::get_userpf_device(m_shim)};
+      std::string gname{name};
+      m_graphInstance = std::make_unique<zynqaie::graph_instance>(device, gname, am, hw_handle);
     }
 
     void
     reset_graph() override
     {
-      if (auto ret = xclGraphReset(m_xclGraphHandle))
-        throw xrt_core::system_error(ret, "fail to reset graph");
+      try
+      {
+        m_graphInstance->reset();
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to reset graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to reset graph"));
+      }
     }
 
     uint64_t
     get_timestamp() override
     {
-      return xclGraphTimeStamp(m_xclGraphHandle);
+      try
+      {
+        m_graphInstance->get_timestamp();
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to get graph timestamp: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to get graph timestamp"));
+      }
+      return -1;
     }
 
     void
     run_graph(int iterations) override
     {
-      if (auto ret = xclGraphRun(m_xclGraphHandle, iterations))
-        throw xrt_core::system_error(ret, "fail to run graph");
+      try
+      {
+        if (iterations == 0)
+          m_graphInstance->run();
+        else
+          m_graphInstance->run(iterations);
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to run graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to run graph"));
+      }
     }
 
     int
     wait_graph_done(int timeout) override
     {
-      return xclGraphWaitDone(m_xclGraphHandle, timeout);
+      try
+      {
+        m_graphInstance->wait_done(timeout);
+        return 0;
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to wait graph done: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to wait graph done"));
+      }
+      return -1;
     }
 
     void
     wait_graph(uint64_t cycle) override
     {
-      if (auto ret = xclGraphWait(m_xclGraphHandle, cycle))
-        throw xrt_core::system_error(ret, "fail to wait graph");
+      try
+      {
+        if (cycle == 0)
+          m_graphInstance->wait();
+        else
+          m_graphInstance->wait(cycle);
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to wait graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to wait graph"));
+      }
     }
 
     void
     suspend_graph() override
     {
-      if (auto ret = xclGraphSuspend(m_xclGraphHandle))
-        throw xrt_core::system_error(ret, "fail to suspend graph");
+      try
+      {
+        m_graphInstance->suspend();
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to suspend graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to suspend graph"));
+      }
     }
 
     void
     resume_graph() override
     {
-      if (auto ret = xclGraphResume(m_xclGraphHandle))
-        throw xrt_core::system_error(ret, "fail to resume graph");
+      try
+      {
+        m_graphInstance->resume();
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to resume graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to resume graph"));
+      }
     }
 
     void
     end_graph(uint64_t cycle) override
     {
-      if (auto ret = xclGraphEnd(m_xclGraphHandle, cycle))
-        throw xrt_core::system_error(ret, "fail to end graph");
+      try
+      {
+        if (cycle == 0)
+          m_graphInstance->end();
+        else
+          m_graphInstance->end(cycle);
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to end graph: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to end graph"));
+      }
     }
 
     void
     update_graph_rtp(const char* port, const char* buffer, size_t size) override
     {
-      if (auto ret = xclGraphUpdateRTP(m_xclGraphHandle, port, buffer, size))
-        throw xrt_core::system_error(ret, "fail to update graph rtp");
+      try
+      {
+        m_graphInstance->update_rtp(port, buffer, size);
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to update graph rtp: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to update graph rtp"));
+      }
     }
 
     void
     read_graph_rtp(const char* port, char* buffer, size_t size) override
     {
-      if (auto ret = xclGraphReadRTP(m_xclGraphHandle, port, buffer, size))
-        throw xrt_core::system_error(ret, "fail to read graph rtp");
+      try
+      {
+        m_graphInstance->read_rtp(port, buffer, size);
+      }
+      catch (const std::exception& e)
+      {
+        xrt_core::send_exception_message(std::string("fail to read graph rtp: ") + e.what());
+      }
+      catch (...)
+      {
+        xrt_core::send_exception_message(std::string("fail to read graph rtp"));
+      }
     }
   }; // graph_object
 

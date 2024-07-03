@@ -34,11 +34,12 @@ typedef xclDeviceHandle xrtDeviceHandle;
 
 namespace zynqaie {
 
-class graph_type
+class graph_instance
 {
 public:
-    graph_type(std::shared_ptr<xrt_core::device> device, const uuid_t xclbin_uuid, const std::string& name, xrt::graph::access_mode);
-    ~graph_type();
+    graph_instance(std::shared_ptr<xrt_core::device> device, const std::string& name,
+                    xrt::graph::access_mode, const xrt_core::hwctx_handle* hwctxHandle = nullptr);
+    ~graph_instance();
 
     void
     reset();
@@ -93,6 +94,7 @@ private:
     // has been loaded with an xclbin from which meta data can
     // be extracted
     std::shared_ptr<xrt_core::device> device;
+    const xrt_core::hwctx_handle* m_hwctxHandle;
 
     enum class graph_state : unsigned short
     {
