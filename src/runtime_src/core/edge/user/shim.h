@@ -270,7 +270,7 @@ public:
 
 #ifdef XRT_ENABLE_AIE
   zynqaie::Aie* getAieArray();
-  zynqaie::Aied* getAied();
+  zynqaie::aied* getAied();
   int getBOInfo(drm_zocl_info_bo &info);
   void registerAieArray();
   bool isAieRegistered();
@@ -305,7 +305,7 @@ private:
 
 #ifdef XRT_ENABLE_AIE
   std::unique_ptr<zynqaie::Aie> aieArray;
-  std::unique_ptr<zynqaie::Aied> aied;
+  std::unique_ptr<zynqaie::aied> aied;
   xrt::aie::access_mode access_mode = xrt::aie::access_mode::none;
 #endif
 };

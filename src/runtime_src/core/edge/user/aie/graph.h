@@ -39,7 +39,7 @@ class graph_instance
 {
 public:
     graph_instance(std::shared_ptr<xrt_core::device> device, const std::string& name,
-                    xrt::graph::access_mode, const zynqaie::hwctx_object* hwctx = nullptr);
+                    xrt::graph::access_mode, const zynqaie::hwctx_object* hwctx = nullptr, const xrt_core::uuid uuid=xrt_core::uuid());
     ~graph_instance();
 
     void

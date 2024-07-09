@@ -1729,7 +1729,7 @@ getAieArray()
   return aieArray.get();
 }
 
-zynqaie::Aied*
+zynqaie::aied*
 shim::
 getAied()
 {
@@ -1742,7 +1742,7 @@ registerAieArray()
 {
   delete aieArray.release();
   aieArray = std::make_unique<zynqaie::Aie>(mCoreDevice);
-  aied = std::make_unique<zynqaie::Aied>(mCoreDevice.get());
+  aied = std::make_unique<zynqaie::aied>(mCoreDevice.get());
 }
 
 bool

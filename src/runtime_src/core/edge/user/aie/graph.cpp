@@ -50,10 +50,11 @@ namespace zynqaie {
 
 graph_instance::
 graph_instance(std::shared_ptr<xrt_core::device> dev, const std::string& graph_name,
-              xrt::graph::access_mode am, const zynqaie::hwctx_object* hwctx)
+              xrt::graph::access_mode am, const zynqaie::hwctx_object* hwctx, const xrt_core::uuid uuid)
   : device{std::move(dev)}, name{graph_name}, m_hwctxHandle{hwctx}
 {
-    auto xclbin_uuid = m_hwctxHandle ? m_hwctxHandle->get_xclbin_uuid() : xrt_core::uuid();
+    auto xclbin_uuid = m_hwctxHandle ? m_hwctxHandle->get_xclbin_uuid() : uuid;
+    std::cout<<"xclbin_uuid is "<<xclbin_uuid<<std::endl;
 #ifndef __AIESIM__
     auto drv = ZYNQ::shim::handleCheck(device->get_device_handle());
 
@@ -86,7 +87,7 @@ graph_instance(std::shared_ptr<xrt_core::device> dev, const std::string& graph_n
 
     state = graph_state::reset;
 #ifndef __AIESIM__
-    drv->getAied()->registerGraph(this);
+    drv->getAied()->register_graph(this);
 #endif
 }
 
@@ -102,7 +103,7 @@ graph_instance::
 	return;
     }
     drv->closeGraphContext(id);
-    drv->getAied()->deregisterGraph(this);
+    drv->getAied()->deregister_graph(this);
 #endif
 }
 

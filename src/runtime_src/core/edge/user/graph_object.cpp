@@ -13,7 +13,7 @@ namespace zynqaie {
   {
     auto device{xrt_core::get_userpf_device(m_shim)};
     std::string gname{name};
-    m_graphInstance = std::make_unique<zynqaie::graph_instance>(device, gname, am, hwctx);
+    m_graphInstance = std::make_unique<zynqaie::graph_instance>(device, gname, am, hwctx,uuid);
   }
 
   void
