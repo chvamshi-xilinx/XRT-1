@@ -22,6 +22,7 @@
 #include "aie.h"
 #include "xrt.h"
 #include "core/edge/common/aie_parser.h"
+#include "core/edge/user/hwctx_object.h"
 #include "core/common/device.h"
 #include "experimental/xrt_graph.h"
 #include "common_layer/adf_api_config.h"
@@ -38,7 +39,7 @@ class graph_instance
 {
 public:
     graph_instance(std::shared_ptr<xrt_core::device> device, const std::string& name,
-                    xrt::graph::access_mode, const xrt_core::hwctx_handle* hwctxHandle = nullptr);
+                    xrt::graph::access_mode, const zynqaie::hwctx_object* hwctx = nullptr);
     ~graph_instance();
 
     void
@@ -94,7 +95,7 @@ private:
     // has been loaded with an xclbin from which meta data can
     // be extracted
     std::shared_ptr<xrt_core::device> device;
-    const xrt_core::hwctx_handle* m_hwctxHandle;
+    const zynqaie::hwctx_object* m_hwctxHandle;
 
     enum class graph_state : unsigned short
     {

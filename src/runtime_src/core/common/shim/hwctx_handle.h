@@ -53,9 +53,6 @@ public:
   virtual slot_id
   get_slotidx() const = 0;
 
-  virtual xrt::uuid
-  get_xclbin_uuid() const = 0;
-
   // Get a hardware queue for this context.  The return value is
   // allowed to be nullptr if the shim does not support hardware
   // queues.  The returned hwqueue is owned by the hwctx, it is

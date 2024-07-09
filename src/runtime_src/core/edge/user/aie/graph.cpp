@@ -50,8 +50,8 @@ namespace zynqaie {
 
 graph_instance::
 graph_instance(std::shared_ptr<xrt_core::device> dev, const std::string& graph_name,
-              xrt::graph::access_mode am, const xrt_core::hwctx_handle* hwctxHandle)
-  : device{std::move(dev)}, name{graph_name}, m_hwctxHandle{hwctxHandle}
+              xrt::graph::access_mode am, const zynqaie::hwctx_object* hwctx)
+  : device{std::move(dev)}, name{graph_name}, m_hwctxHandle{hwctx}
 {
     auto xclbin_uuid = m_hwctxHandle ? m_hwctxHandle->get_xclbin_uuid() : xrt_core::uuid();
 #ifndef __AIESIM__
