@@ -3,7 +3,6 @@
 // Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 #include "graph_object.h"
 #include "core/edge/user/aie/graph.h"
-#include "core/common/device.h"
 #include "core/common/system.h"
 #include <memory>
 
