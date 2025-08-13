@@ -101,7 +101,7 @@ class hw_context_impl : public std::enable_shared_from_this<hw_context_impl>
       auto uc_buf_size = m_uc_log_bo.size() / num_uc;
 
       // dump the log buffer for each uc in a separate file
-      for (auto i = 0; i < num_uc; i++) {
+      for (size_t i = 0; i < num_uc; i++) {
         auto file_name = "uc_log" + std::to_string(i) + ".txt";
         dump_bo(m_uc_log_bo, file_name, (i * uc_buf_size), uc_buf_size);
       }
@@ -166,7 +166,7 @@ public:
       if (!m_hdl)
         return; // hw ctx not initialized
 
-      m_uc_log_bo = xrt_core::bo_int::create_bo(xrt::hw_context(shared_from_this()),
+      m_uc_log_bo = xrt_core::bo_int::create_bo(m_core_device,
                                                 uc_log_buf_size,
                                                 xrt_core::bo_int::use_type::log);
 
@@ -175,10 +175,10 @@ public:
       auto uc_buf_size = uc_log_buf_size / num_uc;
 
       std::map<uint32_t, size_t> uc_buf_map;
-      for (auto i = 0; i < num_uc; ++i)
+      for (size_t i = 0; i < num_uc; ++i)
         uc_buf_map[i] = uc_buf_size;
 
-      xrt_core::bo_int::config_bo(m_uc_log_bo, uc_buf_map); // configure the log buffer
+      xrt_core::bo_int::config_bo(m_uc_log_bo, uc_buf_map, m_hdl.get()); // configure the log buffer
 
       xrt_core::message::send(xrt_core::message::severity_level::debug, "xrt_hw_context",
                               "UC log buffer initialized successfully");
