@@ -98,3 +98,4 @@ Linux xclmgmt driver  GPLv2
 Linux zocl driver     Dual GPLv2 and Apache 2.0
 User space            Apache 2.0
 ====================  =========================
+
