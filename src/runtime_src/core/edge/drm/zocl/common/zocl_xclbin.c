@@ -129,6 +129,9 @@ zocl_load_bitstream(struct drm_zocl_dev *zdev, char *buffer, int length,
 	char *data = NULL;
 	size_t i;
 
+	if (length <= 0)
+		return -EINVAL;
+
 	memset(&bit_header, 0, sizeof(bit_header));
 	if (xrt_xclbin_parse_header(buffer, DMA_HWICAP_BITFILE_BUFFER_SIZE,
 	    &bit_header)) {
@@ -136,7 +139,12 @@ zocl_load_bitstream(struct drm_zocl_dev *zdev, char *buffer, int length,
 		return -EINVAL;
 	}
 
-	if ((bit_header.HeaderLength + bit_header.BitstreamLength) > length) {
+	/* HeaderLength and BitstreamLength are 32-bit. Adding them in
+	 * unsigned int wraps, and the following byte-swap
+	 * would then walk off the section buffer.
+	 */
+	if ((uint64_t)bit_header.HeaderLength +
+	    (uint64_t)bit_header.BitstreamLength > (uint64_t)length) {
 		DRM_ERROR("bitstream header+stream length parse failed");
 		return -EINVAL;
 	}
@@ -153,36 +161,6 @@ zocl_load_bitstream(struct drm_zocl_dev *zdev, char *buffer, int length,
 		return zocl_load_partial(zdev, data, bit_header.BitstreamLength, slot);
 	/* 0 is for full bitstream */
 	return zocl_fpga_mgr_load(zdev, buffer, length, 0);
-}
-
-int
-zocl_load_aie_only_pdi(struct drm_zocl_dev *zdev, struct drm_zocl_slot* slot, struct axlf *axlf,
-			char __user *xclbin, struct kds_client *client)
-{
-	uint64_t size = 0;
-	char *pdi_buf = NULL;
-	int ret = 0;
-
-	if (client && client->aie_ctx == ZOCL_CTX_SHARED) {
-		DRM_ERROR("%s Shared context can not load xclbin", __func__);
-		return -EPERM;
-	}
-
-	size = zocl_read_sect(PDI, &pdi_buf, axlf, xclbin);
-	if (size == 0)
-		return 0;
-
-	ret = zocl_fpga_mgr_load(zdev, pdi_buf, size, FPGA_MGR_PARTIAL_RECONFIG);
-	vfree(pdi_buf);
-
-	/* Mark AIE out of reset state after load PDI */
-	if (slot->aie) {
-		mutex_lock(&slot->aie_lock);
-		slot->aie->aie_reset = false;
-		mutex_unlock(&slot->aie_lock);
-	}
-
-	return ret;
 }
 
 int
@@ -362,6 +340,8 @@ zocl_update_apertures(struct drm_zocl_dev *zdev, struct drm_zocl_slot *slot)
 	if (slot->ip) {
 		for (i = 0; i < slot->ip->m_count; ++i) {
 			ip = &slot->ip->m_ip_data[i];
+			if (ip->m_base_address == EMPTY_APT_VALUE)
+				continue;
 			apt_idx = get_next_free_apt_index(zdev);
 			if (apt_idx < 0) {
 				DRM_ERROR("No more free apertures\n");
@@ -637,6 +617,51 @@ void zocl_free_sections(struct drm_zocl_dev *zdev, struct drm_zocl_slot *slot)
 	slot->axlf_size = 0;
 	write_unlock(&zdev->attr_rwlock);
 }
+
+#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+/*
+ * Remove a PARTITION_METADATA overlay that was applied when this slot's
+ * xclbin was loaded. Called when the last hw_context on the slot is destroyed.
+ */
+void zocl_slot_remove_xclbin_overlay(struct drm_zocl_dev *zdev,
+				     struct drm_zocl_slot *slot)
+{
+	int err;
+
+	if (!zdev || !slot || slot->partial_overlay_id == -1)
+		return;
+
+	mutex_lock(&slot->slot_xclbin_lock);
+	if (zocl_bitstream_is_locked(zdev, slot))
+		goto unlock;
+
+	zocl_destroy_cu_slot(zdev, slot->slot_idx);
+
+	WRITE_ONCE(zdev->overlay_self_task, current);
+	err = of_overlay_remove(&slot->partial_overlay_id);
+	WRITE_ONCE(zdev->overlay_self_task, NULL);
+	if (err < 0) {
+		/* Tree unchanged, nothing to re-probe. */
+		DRM_WARN("%s: overlay remove failed (%d)\n", __func__, err);
+		goto unlock;
+	}
+
+	slot->partial_overlay_id = -1;
+	DRM_INFO("%s: removed xclbin DT overlay from slot %d\n",
+		 __func__, slot->slot_idx);
+
+	/* CU INTC is device global, only slot 0 owns CUs. */
+	if (slot->slot_idx == 0)
+		zocl_cu_intc_refresh(zdev);
+unlock:
+	mutex_unlock(&slot->slot_xclbin_lock);
+}
+#else
+void zocl_slot_remove_xclbin_overlay(struct drm_zocl_dev *zdev,
+				     struct drm_zocl_slot *slot)
+{
+}
+#endif
 
 /*
  * Load a bitstream, partial metadata or PDI to the FPGA from userspace pointer.

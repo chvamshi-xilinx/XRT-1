@@ -1,6 +1,6 @@
 /**
  *  Copyright (C) 2017-2022 Xilinx, Inc. All rights reserved.
- *  Copyright (C) 2022 Advanced Micro Devices, Inc.
+ *  Copyright (C) 2022-2026 Advanced Micro Devices, Inc.
  *  Author: Sonal Santan
  *  Code copied verbatim from SDAccel xcldma kernel mode driver
  *
@@ -1062,7 +1062,8 @@ static long icap_download(struct icap *icap, const char *buffer,
 		goto free_buffers;
 	}
 
-	if ((bit_header.HeaderLength + bit_header.BitstreamLength) > length) {
+	if ((uint64_t)bit_header.HeaderLength +
+	    (uint64_t)bit_header.BitstreamLength > length) {
 		err = -EINVAL;
 		goto free_buffers;
 	}
@@ -3020,7 +3021,7 @@ static int icap_cache_ps_kernel_axlf_section(const struct axlf *xclbin,
 		return -EINVAL;
 
 	*data = vzalloc(sizeof(struct ps_kernel_node) +
-	    sizeof(struct ps_kernel_data) * (count - 1));
+			sizeof(struct ps_kernel_data) * count);
 	if (*data == NULL)
 		return -ENOMEM;
 
@@ -3906,8 +3907,8 @@ static ssize_t icap_read_ps_kernel(struct file *filp, struct kobject *kobj,
 		if (err)
 			return f_nread;
 
-		size = sizeof(struct ps_kernel_node) + sizeof(struct ps_kernel_data) *
-			(islot->ps_kernel->pkn_count - 1);
+		size = sizeof(struct ps_kernel_node)
+			+ sizeof(struct ps_kernel_data) * islot->ps_kernel->pkn_count;
 		if (offset >= size) {
 			icap_xclbin_rd_unlock(icap, st);
 			return f_nread;
@@ -4529,6 +4530,13 @@ static ssize_t icap_write_rp(struct file *filp, const char __user *data,
 			goto failed;
 		}
 
+		if (data_len > icap->rp_bit_len) {
+			ICAP_ERR(icap, "Write size %zu exceeds allocated buffer size %zu",
+				data_len, icap->rp_bit_len);
+			ret = -EINVAL;
+			goto failed;
+		}
+
 		ret = copy_from_user(icap->rp_bit, data, data_len);
 		if (ret) {
 			ICAP_ERR(icap, "copy bit file failed %ld", ret);
@@ -4618,7 +4626,8 @@ static ssize_t icap_write_rp(struct file *filp, const char __user *data,
 		goto failed;
 	}
 
-	icap->rp_bit_len = bit_header.HeaderLength + bit_header.BitstreamLength;
+	icap->rp_bit_len = (uint64_t)bit_header.HeaderLength +
+		(uint64_t)bit_header.BitstreamLength;
 	if (icap->rp_bit_len > section->m_sectionSize) {
 		ICAP_ERR(icap, "bitstream is too big");
 		ret = -EINVAL;

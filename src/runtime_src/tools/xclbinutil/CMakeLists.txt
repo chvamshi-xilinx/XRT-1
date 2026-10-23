@@ -101,8 +101,16 @@ file(GLOB XCLBINUTIL_MAIN_FILE
 )
 set(XCLBINUTIL_SRCS ${XCLBINUTIL_MAIN_FILE} ${XCLBINUTIL_FILES_SRCS})
 
+
 xrt_configure_version_file(${XCLBINUTIL_NAME} APP)
 add_executable(${XCLBINUTIL_NAME} ${XCLBINUTIL_NAME}-version.rc ${XCLBINUTIL_SRCS})
+
+if (ENABLE_ASAN)
+  # xclbinutil links static Boost (/MT). Override the global MultiThreadedDLL
+  # set by ASAN so the object files match the Boost libraries' CRT metadata.
+  set_target_properties(${XCLBINUTIL_NAME} PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 # Signing xclbin images currently is not support on windows
 if(NOT WIN32)
@@ -142,6 +150,10 @@ include (${XRT_SOURCE_DIR}/CMake/unitTestSupport.cmake)
 
 # OpenSSL encryption is only supported on linux
 if(NOT WIN32 AND NOT XRT_SYSTEM_INSTALL)
+  # Test reconstruction from embedded mirror metadata.
+  xrt_add_test("migrate-forward" "${PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/unittests/migrateForward.py")
+
   # -- Test Signing of the xclbin image using a CER formatted certificate
   xrt_add_test("signing-xclbin_CER" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/signXclbinCER.py")
 

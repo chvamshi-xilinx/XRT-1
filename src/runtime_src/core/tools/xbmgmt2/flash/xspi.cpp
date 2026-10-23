@@ -1,19 +1,6 @@
-/**
- * Copyright (C) 2019 - 2022 Xilinx, Inc
- * Copyright (C) 2022 Advanced Micro Devices, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "xspi.h"
 #include "core/common/system.h"
 #include "core/common/device.h"
@@ -669,9 +656,7 @@ int XSPI_Flasher::parseMCS(std::istream& mcsStream) {
     ELARecord record;
     bool endRecordFound = false;
 
-    int lineno = 0;
     while (!mcsStream.eof() && !endRecordFound) {
-        lineno++;
         std::string line;
         std::getline(mcsStream, line);
         if (line.size() == 0) {
@@ -1153,7 +1138,6 @@ bool XSPI_Flasher::finalTransfer(uint8_t *SendBufPtr, uint8_t *RecvBufPtr, int B
     uint8_t* RecvBufferPtr = RecvBufPtr;
 
     int RemainingBytes = ByteCount;
-    unsigned int BytesTransferred = 0;
 
     /*
     * Fill the DTR/FIFO with as many bytes as it will take (or as many as
@@ -1288,7 +1272,6 @@ bool XSPI_Flasher::finalTransfer(uint8_t *SendBufPtr, uint8_t *RecvBufPtr, int B
                     }
                 }
 
-                BytesTransferred += (DataWidth >> 3);
                 ByteCount -= (DataWidth >> 3);
                 StatusReg = XSpi_GetStatusReg();
                 if((StatusReg & (1<<10)) != 0) {
@@ -1880,9 +1863,9 @@ static int installBitstreamGuard(xrt_core::device *dev, std::FILE *flashDev,
     unsigned char buf[4096], buf1[4096], buf2[4096];
     int ret;
 
-    memset(buf, 0xff, sizeof(buf));
-    memset(buf, 0xff, sizeof(buf1));
-    memset(buf, 0xff, sizeof(buf2));
+    memset(buf, 0xff, sizeof(buf));   // NOLINT(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    memset(buf1, 0xff, sizeof(buf1)); // NOLINT(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    memset(buf2, 0xff, sizeof(buf2)); // NOLINT(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     memcpy(buf + bitstream_guard_offset, BITSTREAM_GUARD,
         sizeof(BITSTREAM_GUARD));
     stripe_data(buf, buf1, buf2, sizeof(buf));

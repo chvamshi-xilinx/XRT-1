@@ -1,30 +1,17 @@
-/**
- * Copyright (C) 2016-2025 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- * Common XRT SAK Util functions
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
-#ifndef _xrt_core_common_utils_h_
-#define _xrt_core_common_utils_h_
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021-2022 Xilinx, Inc
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. - All rights reserved
+#ifndef xrt_core_common_utils_h
+#define xrt_core_common_utils_h
 
 #include "config.h"
 #include "scope_guard.h"
 
-#include <string>
-#include <sstream>
+#include <cstdint>
 #include <functional>
-#include <iostream>
+#include <iosfwd>
+#include <sstream>
+#include <string>
 #include <vector>
 
 /* HLS CU bit status */
@@ -35,7 +22,7 @@
 #define CU_AP_CONTINUE	(0x1 << 4)
 #define CU_AP_RESET	(0x1 << 5)
 
-namespace xrt_core { namespace utils {
+namespace xrt_core::utils {
 
 /**
  * ios_flags_restore() - scope guard for ios flags
@@ -155,6 +142,27 @@ XRT_CORE_COMMON_EXPORT
 std::string
 get_sys_last_err_msg();
 
-}} // utils, xrt_core
+XRT_CORE_COMMON_EXPORT
+std::string
+getenv(const char* name);
+
+XRT_CORE_COMMON_EXPORT
+bool
+is_env(const char* name);
+
+XRT_CORE_COMMON_EXPORT
+std::string
+strerror(int err);
+
+// is_elevated_process() - returns true when running with elevated privileges.
+//
+// On Linux: true when effective UID is 0 (root).
+// On Windows: true when the process token is UAC-elevated (Run as Administrator).
+// Used to restrict untrusted config-file search paths (SWSPLAT-39875 / CWE-427).
+XRT_CORE_COMMON_EXPORT
+bool
+is_elevated_process();
+
+} // xrt_core::utils
 
 #endif

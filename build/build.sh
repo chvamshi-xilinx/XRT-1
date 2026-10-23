@@ -7,19 +7,23 @@ VERSION=`grep '^VERSION_ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
 MAJOR=${VERSION%.*}
 BUILDDIR=$(readlink -f $(dirname ${BASH_SOURCE[0]}))
 CORE=`grep -c ^processor /proc/cpuinfo`
-CMAKE=cmake
-CMAKE_MAJOR_VERSION=`cmake --version | head -n 1 | awk '{print $3}' |awk -F. '{print $1}'`
-CPU=`uname -m`
-
-if [[ $CMAKE_MAJOR_VERSION != 3 ]]; then
-    if [[ $OSDIST == "centos" ]] || [[ $OSDIST == "amzn" ]] || [[ $OSDIST == "rhel" ]] || [[ $OSDIST == "fedora" ]] || [[ $OSDIST == "mariner" ]] || [[ $OSDIST == "almalinux" ]] || [[ $OSDIST == "rocky" ]]; then
-        CMAKE=cmake3
-        if [[ ! -x "$(command -v $CMAKE)" ]]; then
-            echo "$CMAKE is not installed, please run xrtdeps.sh"
-            exit 1
-        fi
+CMAKE=""
+if command -v cmake >/dev/null 2>&1; then
+    CMAKE_MAJOR_VERSION=$(cmake --version | head -n 1 | awk '{print $3}' | cut -d. -f1)
+    if [[ "$CMAKE_MAJOR_VERSION" -ge 3 ]]; then
+        CMAKE=cmake
     fi
 fi
+
+if [[ -z "$CMAKE" ]]; then
+    if command -v cmake3 >/dev/null 2>&1; then
+        CMAKE=cmake3
+    else
+        echo "CMake >= 3 is required, please run xrtdeps.sh"
+        exit 1
+    fi
+fi
+CPU=`uname -m`
 
 if [[ $CPU == "aarch64" ]] && [[ $OSDIST == "ubuntu" ]]; then
     # On ARM64 Ubuntu use GCC version 8+, GCC version 7 has
@@ -414,8 +418,8 @@ if [[ $opt == 1 ]]; then
   if [[ $driver == 1 ]]; then
     unset CC
     unset CXX
-    echo "make -C usr/src/xrt-2.23.0/driver/xocl"
-    make -C usr/src/xrt-2.23.0/driver/xocl
+    echo "make -C usr/src/xrt-2.27.0/driver/xocl"
+    make -C usr/src/xrt-2.27.0/driver/xocl
     if [[ $CPU == "aarch64" ]]; then
 	# I know this is dirty as it messes up the source directory with build artifacts but this is the
 	# quickest way to enable native zocl build in Travis CI environment for aarch64

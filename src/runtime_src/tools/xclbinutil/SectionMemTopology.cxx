@@ -18,7 +18,6 @@
 
 #include "XclBinUtilities.h"
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 #include <iostream>
 
 namespace XUtil = XclBinUtilities;
@@ -28,7 +27,7 @@ SectionMemTopology::init SectionMemTopology::initializer;
 
 SectionMemTopology::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(MEM_TOPOLOGY, "MEM_TOPOLOGY", boost::factory<SectionMemTopology*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(MEM_TOPOLOGY, "MEM_TOPOLOGY", []{ return new SectionMemTopology(); });
   sectionInfo->nodeName = "mem_topology";
 
   sectionInfo->supportedAddFormats.push_back(FormatType::json);
@@ -159,7 +158,7 @@ SectionMemTopology::marshalToJSON(char* _pDataSection,
                  % getMemTypeStr((MEM_TYPE)pHdr->m_mem_data[index].m_type)
                  % (unsigned int)pHdr->m_mem_data[index].m_used
                  % pHdr->m_mem_data[index].m_size
-                 % pHdr->m_mem_data[index].m_tag
+                 % XUtil::bounded_fixed_cstr(pHdr->m_mem_data[index].m_tag)
                  % pHdr->m_mem_data[index].m_base_address);
 
     // Write out the entire structure
@@ -168,7 +167,7 @@ SectionMemTopology::marshalToJSON(char* _pDataSection,
     mem_data.put("m_type", getMemTypeStr((MEM_TYPE)pHdr->m_mem_data[index].m_type).c_str());
     mem_data.put("m_used", (boost::format("%d") % (unsigned int)pHdr->m_mem_data[index].m_used).str());
     mem_data.put("m_sizeKB", (boost::format("0x%lx") % pHdr->m_mem_data[index].m_size).str());
-    mem_data.put("m_tag", (boost::format("%s") % pHdr->m_mem_data[index].m_tag).str());
+    mem_data.put("m_tag", XUtil::bounded_fixed_cstr(pHdr->m_mem_data[index].m_tag));
     mem_data.put("m_base_address", (boost::format("0x%lx") % pHdr->m_mem_data[index].m_base_address).str());
 
     m_mem_data.push_back({ "", mem_data });   // Used to make an array of objects

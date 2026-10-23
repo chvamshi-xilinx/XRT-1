@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
-
-#include <array>
-
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "hip/core/common.h"
 #include "hip/core/event.h"
 #include "hip/core/module.h"
 #include "hip/core/stream.h"
 #include "hip/hip_xrt.h"
 
-#include <elfio/elfio.hpp>
+#include <array>
+#include <cstring>
+#include <fstream>
+#include <map>
 
 namespace xrt::core::hip {
 
@@ -276,7 +276,7 @@ hipModuleLoad(hipModule_t* module, const char* fname)
     // Treat fname passed is filepath to full ELF and
     // try creating full ELF module
     // if it throws fallback to xclbin + ELF flow
-    xrt::core::hip::module_handle handle;
+    xrt::core::hip::module_handle handle = nullptr;
     if (xrt::core::hip::hip_module_file_is_elf(fname)) {
       handle = xrt::core::hip::create_full_elf_module(std::string{fname});
       *module = reinterpret_cast<hipModule_t>(handle);
@@ -303,4 +303,3 @@ hipFuncSetAttribute(const void* func, hipFuncAttribute attr, int value)
     xrt::core::hip::hip_func_set_attribute(func, attr, value);
   });
 }
-

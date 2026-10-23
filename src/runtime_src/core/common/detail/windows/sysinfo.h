@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.
-
-// Local - Include files
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "core/common/error.h"
 
-// System - Include Files
-#include <windows.h>
 #include <string>
 #include <thread>
 #include <array>
 
-// 3rd Party Library - Include Files
 #include <boost/property_tree/ptree.hpp>
 #include <boost/format.hpp>
 
-#ifdef _WIN32
-# pragma warning (disable : 4996)
+// Exclude rarely-used headers (e.g. Winsock) from <windows.h> for
+// faster builds and fewer conflicts.
+#ifndef WIN32_LEAN_AND_MEAN
+# define WIN32_LEAN_AND_MEAN
 #endif
+#define NOMINMAX
+#include <windows.h>
 
 namespace {
 
@@ -103,8 +102,19 @@ osNameImpl()
 {
   OSVERSIONINFO vi;
   vi.dwOSVersionInfoSize = sizeof(vi);
+
+#ifdef _WIN32
+# pragma warning (push)
+# pragma warning (disable : 4996)
+#endif
+
   if (GetVersionEx(&vi) == 0)
     throw xrt_core::error("Cannot get OS version information");
+
+#ifdef _WIN32
+# pragma warning( pop )
+#endif
+
   switch (vi.dwPlatformId)
   {
   case VER_PLATFORM_WIN32s:
@@ -174,6 +184,25 @@ get_os_info(boost::property_tree::ptree &pt)
   BufferSize = sizeof value;
   RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "ProcessorNameString", RRF_RT_ANY, NULL, (PVOID)&value, &BufferSize);
   pt.put("processor", value);
+}
+
+std::pair<unsigned int, unsigned int>
+get_terminal_size()
+{
+  // Query the visible console window
+  const HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+  CONSOLE_SCREEN_BUFFER_INFO csbi{};
+  if (hout == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(hout, &csbi))
+    throw xrt_core::error("Unable to determine terminal size");
+
+  // srWindow describes the visible window; derive rows/cols from it (the
+  // buffer height/width can be much larger than what is on screen).
+  const auto cols = static_cast<unsigned int>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+  const auto rows = static_cast<unsigned int>(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+  if (rows == 0 || cols == 0)
+    throw xrt_core::error("Unable to determine terminal size");
+
+  return {rows, cols};
 }
 
 bool

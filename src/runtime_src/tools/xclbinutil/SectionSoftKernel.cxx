@@ -1,26 +1,11 @@
-/**
- * Copyright (C) 2019-2022 Xilinx, Inc
- * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "SectionSoftKernel.h"
 
 #include "XclBinUtilities.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
 namespace XUtil = XclBinUtilities;
@@ -35,7 +20,7 @@ SectionSoftKernel::init SectionSoftKernel::initializer;
 
 SectionSoftKernel::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(SOFT_KERNEL, "SOFT_KERNEL", boost::factory<SectionSoftKernel*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(SOFT_KERNEL, "SOFT_KERNEL", []{ return new SectionSoftKernel(); });
   sectionInfo->supportsSubSections = true;
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::obj));
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::metadata));
@@ -169,11 +154,11 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
                              "  mpo_md5_value (0x%lx): '%s'\n"
                              "  mpo_symbol_name (0x%lx): '%s'\n"
                              "  m_num_instances: %d")
-               % pHdr->mpo_name % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_name)
+               % pHdr->mpo_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, _origSectionSize)
                % pHdr->m_image_offset % pHdr->m_image_size
-               % pHdr->mpo_version % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_version)
-               % pHdr->mpo_md5_value % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_md5_value)
-               % pHdr->mpo_symbol_name % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_symbol_name)
+               % pHdr->mpo_version % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, _origSectionSize)
+               % pHdr->mpo_md5_value % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_md5_value, _origSectionSize)
+               % pHdr->mpo_symbol_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_symbol_name, _origSectionSize)
                % pHdr->m_num_instances);
 
   // Get the JSON metadata
@@ -204,7 +189,7 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_name
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(soft_kernel) + pHdr->mpo_name;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, _origSectionSize);
     auto sValue = ptSK.get<std::string>("mpo_name", sDefault);
 
     if (sValue.compare(getSectionIndexName()) != 0) {
@@ -219,7 +204,7 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_version
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(soft_kernel) + pHdr->mpo_version;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, _origSectionSize);
     auto sValue = ptSK.get<std::string>("mpo_version", sDefault);
     softKernelHdr.mpo_version = sizeof(soft_kernel) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -228,7 +213,7 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_md5_value
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(soft_kernel) + pHdr->mpo_md5_value;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_md5_value, _origSectionSize);
     auto sValue = ptSK.get<std::string>("mpo_md5_value", sDefault);
     softKernelHdr.mpo_md5_value = sizeof(soft_kernel) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -237,7 +222,7 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_symbol_name
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(soft_kernel) + pHdr->mpo_symbol_name;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_symbol_name, _origSectionSize);
     auto sValue = ptSK.get<std::string>("mpo_symbol_name", sDefault);
     softKernelHdr.mpo_symbol_name = sizeof(soft_kernel) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -283,7 +268,12 @@ SectionSoftKernel::copyBufferUpdateMetadata(const char* _pOrigDataSection,
   std::string sStringBlock = stringBlock.str();
   _buffer.write(sStringBlock.c_str(), sStringBlock.size());
 
-  // Image
+  // Image — validate offset+size against the original section before reading
+  {
+    uint64_t img_end = static_cast<uint64_t>(pHdr->m_image_offset) + pHdr->m_image_size;
+    if (img_end > _origSectionSize)
+      throw std::runtime_error("soft_kernel m_image_offset/m_image_size out of bounds");
+  }
   _buffer.write(reinterpret_cast<const char*>(pHdr) + pHdr->m_image_offset, pHdr->m_image_size);
 }
 
@@ -409,6 +399,12 @@ SectionSoftKernel::writeObjImage(std::ostream& _oStream) const
   // No look at the data
   auto pHdr = reinterpret_cast<soft_kernel*>(m_pBuffer);
 
+  {
+    uint64_t img_end = static_cast<uint64_t>(pHdr->m_image_offset) + pHdr->m_image_size;
+    if (img_end > m_bufferSize)
+      throw std::runtime_error("soft_kernel m_image_offset/m_image_size out of bounds");
+  }
+
   auto pFWBuffer = reinterpret_cast<const char*>(pHdr) + pHdr->m_image_offset;
   _oStream.write(pFWBuffer, pHdr->m_image_size);
 }
@@ -436,20 +432,20 @@ SectionSoftKernel::writeMetadata(std::ostream& _oStream) const
                              "  mpo_md5_value (0x%lx): '%s'\n"
                              "  mpo_symbol_name (0x%lx): '%s'\n"
                              "  m_num_instances: %d")
-               % pHdr->mpo_name % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_name)
+               % pHdr->mpo_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, m_bufferSize)
                % pHdr->m_image_offset % pHdr->m_image_size
-               % pHdr->mpo_version % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_version)
-               % pHdr->mpo_md5_value % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_md5_value)
-               % pHdr->mpo_symbol_name % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_symbol_name)
+               % pHdr->mpo_version % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, m_bufferSize)
+               % pHdr->mpo_md5_value % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_md5_value, m_bufferSize)
+               % pHdr->mpo_symbol_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_symbol_name, m_bufferSize)
                % pHdr->m_num_instances);
 
   // Convert the data from the binary format to JSON
   boost::property_tree::ptree ptSoftKernel;
 
-  ptSoftKernel.put("mpo_name", reinterpret_cast<char*>(pHdr) + pHdr->mpo_name);
-  ptSoftKernel.put("mpo_version", reinterpret_cast<char*>(pHdr) + pHdr->mpo_version);
-  ptSoftKernel.put("mpo_md5_value", reinterpret_cast<char*>(pHdr) + pHdr->mpo_md5_value);
-  ptSoftKernel.put("mpo_symbol_name", reinterpret_cast<char*>(pHdr) + pHdr->mpo_symbol_name);
+  ptSoftKernel.put("mpo_name",        XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name,        m_bufferSize));
+  ptSoftKernel.put("mpo_version",     XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version,     m_bufferSize));
+  ptSoftKernel.put("mpo_md5_value",   XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_md5_value,   m_bufferSize));
+  ptSoftKernel.put("mpo_symbol_name", XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_symbol_name, m_bufferSize));
   ptSoftKernel.put("m_num_instances", (boost::format("%d") % pHdr->m_num_instances).str());
 
   boost::property_tree::ptree root;

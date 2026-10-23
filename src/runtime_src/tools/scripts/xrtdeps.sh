@@ -84,7 +84,6 @@ rh_package_list()
      libyaml-devel \
      lm_sensors \
      make \
-     ncurses-devel \
      ocl-icd \
      ocl-icd-devel \
      opencl-headers \
@@ -97,6 +96,7 @@ rh_package_list()
      python3 \
      python3-pip \
      python3-devel \
+     python3-pyyaml \
      rapidjson-devel \
      rpm-build \
      strace \
@@ -178,6 +178,7 @@ ub_package_list()
      cppcheck \
      curl \
      dkms \
+     elfutils \
      file \
      g++ \
      gcc \
@@ -196,7 +197,6 @@ ub_package_list()
      libgtest-dev \
      libjpeg-dev \
      libjson-glib-dev \
-     libncurses5-dev \
      libopencv-core-dev \
      libpng-dev \
      libprotoc-dev \
@@ -224,6 +224,7 @@ ub_package_list()
      python3-pip \
      python3-sphinx \
      python3-sphinx-rtd-theme \
+     python3-yaml \
      sphinx-common \
      strace \
      systemtap-sdt-dev \
@@ -284,7 +285,6 @@ fd_package_list()
      libyaml-devel \
      lm_sensors \
      make \
-     ncurses-devel \
      ocl-icd \
      ocl-icd-devel \
      opencl-headers \
@@ -299,6 +299,7 @@ fd_package_list()
      python3-devel \
      python3-pip \
      python3-sphinx \
+     python3-pyyaml \
      redhat-lsb \
      rapidjson-devel \
      rpm-build \
@@ -325,6 +326,7 @@ suse_package_list()
      curl \
      dkms \
      dmidecode \
+     elfutils \
      gcc \
      gcc-c++ \
      gdb \
@@ -349,7 +351,6 @@ suse_package_list()
      libyaml-devel \
      lsb-release \
      make \
-     ncurses-devel \
      opencl-cpp-headers \
      pciutils \
      perl \
@@ -357,6 +358,7 @@ suse_package_list()
      protobuf-devel \
      python3-devel \
      python3-pip \
+     python3-PyYAML \
      rpm-build \
      strace \
      systemtap-sdt-devel \
@@ -400,7 +402,6 @@ mariner_package_list()
      lm_sensors \
      lsb-release \
      make \
-     ncurses-devel \
      ocl-icd \
      ocl-icd-devel \
      opencl-headers \
@@ -415,6 +416,7 @@ mariner_package_list()
      python3 \
      python3-pip \
      python3-devel \
+     python3-pyyaml \
      rapidjson-devel \
      rpm-build \
      strace \
@@ -448,7 +450,6 @@ arch_package_list()
      libyaml \
      lm_sensors \
      lsb-release \
-     ncurses \
      ocl-icd \
      opencl-headers \
      openssl \
@@ -461,6 +462,7 @@ arch_package_list()
      python-sphinx \
      python-breathe \
      python-sphinx_rtd_theme \
+     python-yaml \
      rapidjson \
      strace \
      systemtap \
@@ -752,7 +754,7 @@ install_pybind11()
         dnf install -y pybind11-devel python3-pybind11
     elif [ $FLAVOR == "ubuntu" ] && [ $MAJOR -ge 23 ]; then
         apt-get install -y pybind11-dev
-    elif [ $FLAVOR == "linuxmint" ]; then
+    elif [ $FLAVOR == "linuxmint" ] || [ $FLAVOR == "debian" ]; then
         apt-get install -y pybind11-dev
     elif [ $FLAVOR == "arch" ]; then
         pacman -Syu --needed --noconfirm pybind11
@@ -760,6 +762,7 @@ install_pybind11()
         # Install/upgrade pybind11 for building the XRT python bindings
         # We need 2.6.0 minimum version
         pip3 install -U pybind11
+        pip3 install PyYAML
     fi
 }
 

@@ -198,7 +198,12 @@ get_slot(struct drm_zocl_dev * zdev, struct kds_client* client, int hw_ctx_id)
 	}
 
 	slot = zdev->pr_slot[slot_idx];
-	// WorkAround for older flows where there is single slot for AIE
+	/*
+	 * Deprecated: WorkAround for older flows where there was a single
+	 * slot for AIE. With unified slot selection via get_free_slot(),
+	 * this fallback should no longer be needed. To be removed in a
+	 * future release.
+	 */
 	if (!slot || !slot->aie) {
 		for (i = 0; i < MAX_PR_SLOT_NUM; i++) {
 			slot = zdev->pr_slot[i];
@@ -376,15 +381,45 @@ zocl_aie_slot_reset(struct drm_zocl_slot* slot)
 
 }
 
+/*
+ * Drop zocl's AIE bookkeeping without aie_partition_release().
+ * Slot 0's partition device is destroyed by the libdfx overlay removal
+ * that follows hw-context destroy. Releasing it here as well runs
+ * aie_part_remove() twice and oopses.
+ */
+void
+zocl_detach_aie(struct drm_zocl_slot *slot)
+{
+	mutex_lock(&slot->aie_lock);
+
+	if (slot->aie_information) {
+		vfree(slot->aie_information);
+		slot->aie_information = NULL;
+	}
+
+	if (!slot->aie) {
+		mutex_unlock(&slot->aie_lock);
+		return;
+	}
+
+	if (slot->aie->wq)
+		destroy_workqueue(slot->aie->wq);
+
+	vfree(slot->aie->err.errors);
+	vfree(slot->aie);
+	slot->aie = NULL;
+	mutex_unlock(&slot->aie_lock);
+}
+
 void
 zocl_destroy_aie(struct drm_zocl_slot* slot)
 {
-	if (!slot->aie_information)
-		return;
-
 	mutex_lock(&slot->aie_lock);
-	vfree(slot->aie_information);
-	slot->aie_information = NULL;
+
+	if (slot->aie_information) {
+		vfree(slot->aie_information);
+		slot->aie_information = NULL;
+	}
 
 	if (!slot->aie) {
 		mutex_unlock(&slot->aie_lock);
@@ -420,7 +455,7 @@ zocl_cleanup_aie(struct drm_zocl_slot *slot)
 		 */
 		if( !slot->aie->aie_reset) {
 			ret = zocl_aie_slot_reset(slot);
-			if (ret)
+			if (ret && ret != -ENODEV)
 				return ret;
 		}
 
@@ -499,6 +534,7 @@ zocl_create_aie(struct drm_zocl_slot *slot, struct axlf *axlf, char __user *xclb
 	uint64_t offset;
 	uint64_t size;
 	struct aie_partition_req req;
+	struct device *aie_dev;
 	int rval = 0;
 
 	rval = xrt_xclbin_section_info(axlf, AIE_METADATA, &offset, &size);
@@ -558,16 +594,16 @@ zocl_create_aie(struct drm_zocl_slot *slot, struct axlf *axlf, char __user *xclb
 		goto done;
 	}
 
-	slot->aie->aie_dev = aie_partition_request(&req);
-
-
-	if (IS_ERR(slot->aie->aie_dev)) {
-		rval = PTR_ERR(slot->aie->aie_dev);
+	aie_dev = aie_partition_request(&req);
+	if (IS_ERR(aie_dev)) {
+		rval = PTR_ERR(aie_dev);
+		slot->aie->aie_dev = NULL;
 		DRM_ERROR("Request AIE partition %d, %d\n",
 		    req.partition_id, rval);
 		goto done;
 	}
 
+	slot->aie->aie_dev = aie_dev;
 	slot->aie->partition_id = req.partition_id;
 	slot->aie->uid = req.uid;
 

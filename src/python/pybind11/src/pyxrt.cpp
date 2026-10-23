@@ -1,18 +1,21 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2026 Xilinx, Inc. All rights reserved
 
 /**
  * Pybind11 module for XRT C++ APIs
  *
- * Copyright (C) 2019-2022 Xilinx, Inc
+ * Copyright (C) 2019-2026 Xilinx, Inc
  *
  * Authors: graham.schelle@xilinx.com
  *          sonal.santan@xilinx.com
+ *          thomthehound@gmail.com
  */
 
 // XRT includes
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_kernel.h"
 #include "xrt/xrt_bo.h"
+#include "xrt/xrt_graph.h"
 #include "xrt/experimental/xrt_module.h"
 #include "xrt/experimental/xrt_message.h"
 #include "xrt/experimental/xrt_system.h"
@@ -20,7 +23,12 @@
 #include "xrt/experimental/xrt_elf.h"
 #include "xrt/experimental/xrt_aie.h"
 #include "xrt/experimental/xrt_ext.h"
+#include "xrt/experimental/xrt_ip.h"
+#include "xrt/experimental/xrt_error.h"
 #include "xrt/experimental/xrt_kernel.h"
+#include "xrt/experimental/xrt_mailbox.h"
+#include "xrt/experimental/xrt_profile.h"
+#include "xrt/detail/xrt_error_code.h"
 
 // Pybind11 includes
 #include <pybind11/pybind11.h>
@@ -29,9 +37,196 @@
 #include <pybind11/stl_bind.h>
 
 // C++11 includes
+#include <stdexcept>
 #include <string>
 
 namespace py = pybind11;
+
+//-----------------------------------------------------------------------------
+// Deprecated Python compatibility shim for device.load_xclbin().
+// Schedule for removal after downstream users have migrated to hw_context.
+
+namespace {
+
+class xrt_device_handle_guard
+{
+  xrtDeviceHandle handle = nullptr;
+
+public:
+  explicit
+  xrt_device_handle_guard(const xrt::device& device)
+    : handle(xrtDeviceOpenFromXcl(static_cast<xclDeviceHandle>(device)))
+  {
+    if (!handle)
+      throw std::runtime_error("Failed to create temporary XRT device handle for load_xclbin compatibility shim");
+  }
+
+  xrt_device_handle_guard(const xrt_device_handle_guard&) = delete;
+  xrt_device_handle_guard& operator=(const xrt_device_handle_guard&) = delete;
+  xrt_device_handle_guard(xrt_device_handle_guard&&) = delete;
+  xrt_device_handle_guard& operator=(xrt_device_handle_guard&&) = delete;
+
+  ~xrt_device_handle_guard()
+  {
+    if (handle)
+      xrtDeviceClose(handle);
+  }
+
+  xrtDeviceHandle
+  get() const
+  {
+    return handle;
+  }
+};
+
+void
+warn_deprecated_load_xclbin()
+{
+  if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                   "pyxrt.device.load_xclbin() is deprecated; use pyxrt.hw_context(device, xclbin) or pyxrt.hw_context(device, xclbin_path) instead",
+                   1) == -1)
+    throw py::error_already_set();
+}
+
+void
+warn_deprecated_kernel_device_constructor()
+{
+  if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                   "kernel(device, uuid, name[, mode]) is deprecated; use kernel(hw_context, name) instead.",
+                   1) == -1)
+    throw py::error_already_set();
+}
+
+xrt::kernel
+kernel_device_compat(const xrt::device& device, const xrt::uuid& xclbin_id,
+                     const std::string& name, xrt::kernel::cu_access_mode mode)
+{
+  // Convert kernel cu_access_mode to hw_context access_mode
+  auto ctx_mode = (mode == xrt::kernel::cu_access_mode::exclusive)
+      ? xrt::hw_context::access_mode::exclusive
+      : xrt::hw_context::access_mode::shared;
+
+  xrt::hw_context ctx(device, xclbin_id, ctx_mode);
+  return {ctx, name};
+}
+
+void
+bind_kernel_device_compat(py::class_<xrt::kernel>& pyker)  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+{
+  pyker
+    .def(py::init([](const xrt::device& d, const xrt::uuid& u, const std::string& n,
+                     xrt::kernel::cu_access_mode m) {
+        warn_deprecated_kernel_device_constructor();
+        py::gil_scoped_release release;
+        return new xrt::kernel(kernel_device_compat(d, u, n, m));
+      }),
+      py::arg("device"), py::arg("uuid"), py::arg("name"), py::arg("mode"),
+      "Deprecated compatibility shim. Use kernel(hw_context, name) for new code")
+    .def(py::init([](const xrt::device& d, const xrt::uuid& u, const std::string& n) {
+        warn_deprecated_kernel_device_constructor();
+        py::gil_scoped_release release;
+        return new xrt::kernel(kernel_device_compat(d, u, n, xrt::kernel::cu_access_mode::shared));
+      }),
+      py::arg("device"), py::arg("uuid"), py::arg("name"),
+      "Deprecated compatibility shim. Use kernel(hw_context, name) for new code");
+}
+
+xrt::uuid
+load_xclbin_compat(const xrt::device& device, const xrt::xclbin& xclbin)
+{
+  xrt_device_handle_guard dhdl(device);
+
+  if (xrtDeviceLoadXclbin(dhdl.get(), xclbin.get_axlf()) != 0)
+    throw std::runtime_error("xrtDeviceLoadXclbin failed in load_xclbin compatibility shim");
+
+  return xclbin.get_uuid();
+}
+
+void
+bind_load_xclbin_compat(py::class_<xrt::device>& pydevice)
+{
+  pydevice
+    .def("load_xclbin", [](const xrt::device& d, const std::string& xclbin_path) {
+        warn_deprecated_load_xclbin();
+        xrt::xclbin xclbin{xclbin_path};
+        py::gil_scoped_release release;
+        return load_xclbin_compat(d, xclbin);
+      },
+      py::arg("xclbin_path"),
+      "Deprecated compatibility shim. Load an xclbin and return its UUID; use hw_context(device, xclbin_path) for new code")
+    .def("load_xclbin", [](const xrt::device& d, const xrt::xclbin& xclbin) {
+        warn_deprecated_load_xclbin();
+        py::gil_scoped_release release;
+        return load_xclbin_compat(d, xclbin);
+      },
+      py::arg("xclbin"),
+      "Deprecated compatibility shim. Load an xclbin and return its UUID; use hw_context(device, xclbin) for new code");
+}
+
+// End shim.
+//
+// Helpers for kernel/run argument binding from Python.
+//
+
+static void
+set_run_arg_from_pyobject(xrt::run& r, int index, const py::handle& item)
+{
+  if (item.is_none()) {
+    void* null_arg = nullptr;
+    r.set_arg(index, null_arg);
+    return;
+  }
+
+  try {
+    r.set_arg(index, item.cast<xrt::bo>());
+    return;
+  }
+  catch (const std::exception&) {  }
+
+  try {
+    r.set_arg<int>(index, item.cast<int>());
+    return;
+  }
+  catch (const std::exception&) {  }
+
+  throw std::runtime_error("Unsupported kernel argument type");
+}
+
+static xrt::run&
+start_run_from_pyargs(xrt::run& r, py::args args)
+{
+  int arg_idx = 0;
+  const xrt::autostart* as = nullptr;
+
+  if (!args.empty() && py::isinstance<xrt::autostart>(args[0])) {
+    as = &args[0].cast<const xrt::autostart&>();
+    arg_idx = 1;
+  }
+
+  int i = 0;
+  for (size_t j = arg_idx; j < args.size(); ++j, ++i)
+    set_run_arg_from_pyobject(r, i, args[j]);
+
+  if (as) {
+    py::gil_scoped_release release;
+    r.start(*as);
+  }
+  else {
+    r.start();
+  }
+
+  return r;
+}
+
+static xrt::run
+start_kernel_from_pyargs(xrt::kernel& k, py::args args)
+{
+  xrt::run r(k);
+  start_run_from_pyargs(r, args);
+  return r;
+}
+
+} // namespace
 
 PYBIND11_MAKE_OPAQUE(std::vector<xrt::xclbin::ip>);
 
@@ -44,6 +239,7 @@ PYBIND11_MODULE(pyxrt, m) {
  *
  *
  */
+
     m.attr("XCL_BO_FLAGS_NONE") = py::int_(XCL_BO_FLAGS_NONE);
 
     py::enum_<xclBOSyncDirection>(m, "xclBOSyncDirection", "DMA flags used with DMA API")
@@ -94,9 +290,19 @@ PYBIND11_MODULE(pyxrt, m) {
         .value("debug", xrt::message::level::debug)
         .export_values();
 
+    py::enum_<xrtErrorClass>(m, "xrt_error_class", "XRT error class categories")
+        .value("first_entry", XRT_ERROR_CLASS_FIRST_ENTRY)
+        .value("system", XRT_ERROR_CLASS_SYSTEM)
+        .value("aie", XRT_ERROR_CLASS_AIE)
+        .value("hardware", XRT_ERROR_CLASS_HARDWARE)
+        .value("unknown", XRT_ERROR_CLASS_UNKNOWN)
+        .value("last_entry", XRT_ERROR_CLASS_LAST_ENTRY)
+        .export_values();
+
 /*
  * Global Functions
  */
+
     m.def("enumerate_devices", &xrt::system::enumerate_devices, "Enumerate devices in system");
     m.def("log_message", &xrt::message::log, "Dispatch formatted log message");
 
@@ -105,6 +311,7 @@ PYBIND11_MODULE(pyxrt, m) {
  * XRT:: UUID (needed since UUID classes passed outside of objects)
  *
  */
+
     py::class_<xrt::uuid>(m, "uuid", "XRT UUID object to identify a compiled xclbin binary")
         .def(py::init<char *>())
         .def("to_string", &xrt::uuid::to_string, "Convert XRT UUID object to string");
@@ -113,38 +320,137 @@ PYBIND11_MODULE(pyxrt, m) {
 *  xrt::hw_context
 */
 
-    py::class_<xrt::hw_context>(m, "hw_context", "A hardware context associates an xclbin with hardware resources.")
-        .def(py::init<>())
+    py::class_<xrt::hw_context> pyhwctx(
+        m,
+        "hw_context",
+        "Hardware context for associating an xclbin or ELF configuration with device resources.");
+
+    py::enum_<xrt::hw_context::access_mode>(pyhwctx, "access_mode", "Hardware context access mode")
+        .value("exclusive", xrt::hw_context::access_mode::exclusive)
+        .value("shared", xrt::hw_context::access_mode::shared)
+        .export_values();
+
+    pyhwctx.def(py::init<>(), "Create an empty hardware context handle.")
         .def(py::init([](const xrt::device& d, const xrt::uuid& u) {
+            py::gil_scoped_release release;
             return new xrt::hw_context(d, u);
-        }))
+        }),
+        py::arg("device"), py::arg("uuid"),
+        "Create a hardware context for a previously registered xclbin UUID.")
+        .def(py::init([](const xrt::device& d, const xrt::uuid& u, xrt::hw_context::access_mode mode) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(d, u, mode);
+        }),
+        py::arg("device"), py::arg("uuid"), py::arg("mode"),
+        "Create a hardware context for a registered xclbin UUID with shared or exclusive access.")
+        .def(py::init([](const xrt::device& d, const xrt::uuid& u, const xrt::hw_context::cfg_param_type& cfg_param) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(d, u, cfg_param);
+        }),
+        py::arg("device"), py::arg("uuid"), py::arg("cfg_param"),
+        "Create a hardware context for a registered xclbin UUID with configuration parameters.")
+        .def(py::init([](xrt::device& d, const xrt::xclbin& xclbin) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(d, d.register_xclbin(xclbin));
+        }),
+        py::arg("device"), py::arg("xclbin"),
+        "Register an xclbin with the device and create a hardware context for it.")
+        .def(py::init([](xrt::device& d, const xrt::xclbin& xclbin, xrt::hw_context::access_mode mode) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(d, d.register_xclbin(xclbin), mode);
+        }),
+        py::arg("device"), py::arg("xclbin"), py::arg("mode"),
+        "Register an xclbin with the device and create a hardware context with the requested access mode.")
+        .def(py::init([](xrt::device& d, const xrt::xclbin& xclbin, const xrt::hw_context::cfg_param_type& cfg_param) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(d, d.register_xclbin(xclbin), cfg_param);
+        }),
+        py::arg("device"), py::arg("xclbin"), py::arg("cfg_param"),
+        "Register an xclbin with the device and create a hardware context with configuration parameters.")
+        .def(py::init([](xrt::device& d, const std::string& xclbin_path) {
+            py::gil_scoped_release release;
+            xrt::xclbin xclbin{xclbin_path};
+            return new xrt::hw_context(d, d.register_xclbin(xclbin));
+        }),
+        py::arg("device"), py::arg("xclbin_path"),
+        "Load xclbin metadata from a path, register it with the device, and create a hardware context.")
+        .def(py::init([](xrt::device& d, const std::string& xclbin_path, xrt::hw_context::access_mode mode) {
+            py::gil_scoped_release release;
+            xrt::xclbin xclbin{xclbin_path};
+            return new xrt::hw_context(d, d.register_xclbin(xclbin), mode);
+        }),
+        py::arg("device"), py::arg("xclbin_path"), py::arg("mode"),
+        "Load xclbin metadata from a path, register it with the device, and create a hardware context with the requested access mode.")
+        .def(py::init([](xrt::device& d, const std::string& xclbin_path, const xrt::hw_context::cfg_param_type& cfg_param) {
+            py::gil_scoped_release release;
+            xrt::xclbin xclbin{xclbin_path};
+            return new xrt::hw_context(d, d.register_xclbin(xclbin), cfg_param);
+        }),
+        py::arg("device"), py::arg("xclbin_path"), py::arg("cfg_param"),
+        "Load xclbin metadata from a path, register it with the device, and create a hardware context with configuration parameters.")
+        .def(py::init([](const xrt::device& device, const xrt::hw_context::cfg_param_type& cfg_param,
+                         xrt::hw_context::access_mode mode) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(device, cfg_param, mode);
+        }),
+        py::arg("device"), py::arg("cfg_param"), py::arg("mode"),
+        "Create a staged hardware context placeholder with configuration parameters and access mode. Use add_config() later to attach an ELF configuration.")
         .def(py::init([](const xrt::device& device, const xrt::elf& elf) {
+            py::gil_scoped_release release;
             return new xrt::hw_context(device, elf);
-        }));
+        }),
+        py::arg("device"), py::arg("elf"),
+        "Create a hardware context from an ELF configuration object.")
+        .def(py::init([](const xrt::device& device, const xrt::elf& elf,
+                         const xrt::hw_context::cfg_param_type& cfg_param,
+                         xrt::hw_context::access_mode mode) {
+            py::gil_scoped_release release;
+            return new xrt::hw_context(device, elf, cfg_param, mode);
+        }),
+        py::arg("device"), py::arg("elf"), py::arg("cfg_param"), py::arg("mode"),
+        "Create a hardware context from an ELF configuration object with configuration parameters and access mode.")
+        .def("add_config", [](xrt::hw_context& ctx, const xrt::elf& elf) {
+            py::gil_scoped_release release;
+            ctx.add_config(elf);
+        }, py::arg("elf"),
+        "Add an ELF configuration object to the hardware context.")
+        .def("get_device", &xrt::hw_context::get_device,
+             "Get the device from which the hardware context was created.")
+        .def("get_xclbin_uuid", &xrt::hw_context::get_xclbin_uuid,
+             "Get the UUID of the xclbin associated with the hardware context.")
+        .def("get_xclbin", &xrt::hw_context::get_xclbin,
+             "Get the xclbin associated with the hardware context.")
+        .def("get_mode", &xrt::hw_context::get_mode,
+             "Get the access mode of the hardware context.")
+        .def("reset_array", [](xrt::hw_context& ctx) {
+            py::gil_scoped_release release;
+            xrt::aie::hw_context{ctx}.reset_array();
+        }, "Reset the AIE array associated with this hardware context.");
 
 /*
  *
  * xrt::device
  *
  */
-    py::class_<xrt::device>(m, "device", "Abstraction of an acceleration device")
-        .def(py::init<>())
-        .def(py::init<unsigned int>())
+
+    py::class_<xrt::device> pydevice(m, "device", "Abstraction of an acceleration device");
+
+    pydevice
+        .def(py::init<>(), "Create an empty device object.")
+        .def(py::init<unsigned int>(), py::arg("index"), "Open a device by index.")
         .def(py::init([] (const std::string& bfd) {
                           return new xrt::device(bfd);
-                      }))
-        .def("load_xclbin", [](xrt::device& d, const std::string& xclbin) {
-                                py::gil_scoped_release release;
-                                return d.load_xclbin(xclbin);
-                            }, "Load an xclbin given the path to the device")
-        .def("load_xclbin", [](xrt::device& d, const xrt::xclbin& xclbin) {
-                                py::gil_scoped_release release;
-                                return d.load_xclbin(xclbin);
-                            }, "Load the xclbin to the device")
+                      }), py::arg("bdf"), "Open a device by BDF string.")
         .def("register_xclbin", [](xrt::device& d, const xrt::xclbin& xclbin) {
+                                py::gil_scoped_release release;
                                 return d.register_xclbin(xclbin);
-                            }, "Register an xclbin with the device")
-        .def("get_xclbin_uuid", &xrt::device::get_xclbin_uuid, "Return the UUID object representing the xclbin loaded on the device")
+                            }, py::arg("xclbin"),
+                            "Register an xclbin with the device. Registration alone does not create a hardware context.");
+
+    bind_load_xclbin_compat(pydevice);
+
+    pydevice
+        .def("get_xclbin_uuid", &xrt::device::get_xclbin_uuid, "Return the UUID of the xclbin currently associated with the device.")
         .def("get_info", [] (xrt::device& d, xrt::info::device key) {
                              /* Convert the value to string since we can have only one return type for get_info() */
                              switch (key) {
@@ -187,18 +493,36 @@ PYBIND11_MODULE(pyxrt, m) {
                              }
                          }, "Obtain the device properties and sensor information");
 
+/*
+ *
+ * xrt::autostart
+ *
+ */
+
+    py::class_<xrt::autostart>(m, "autostart",
+        "Iteration count for auto-restart kernel execution.")
+        .def(py::init<unsigned int>(), py::arg("iterations") = 0,
+             "Construct with iteration count (0 means run until explicitly stopped).")
+        .def_readwrite("iterations", &xrt::autostart::iterations,
+                       "Number of iterations for auto-restart execution.");
 
 /*
  *
  * xrt::run
  *
  */
+
     py::class_<xrt::run>(m, "run", "Represents one execution of a kernel")
         .def(py::init<>())
         .def(py::init<const xrt::kernel &>())
         .def("start", [](xrt::run& r){
                           r.start();
                       }, "Start one execution of a run")
+        .def("start", [](xrt::run& r, const xrt::autostart& as){
+                          py::gil_scoped_release release;
+                          r.start(as);
+                      }, py::arg("autostart"),
+                      "Start auto-restart execution for the specified iteration count.")
         .def("set_arg", [](xrt::run& r, int i, xrt::bo& item){
                             r.set_arg(i, item);
                         }, "Set a specific kernel global argument for a run")
@@ -217,8 +541,24 @@ PYBIND11_MODULE(pyxrt, m) {
         .def("wait2", [](xrt::run&r, const std::chrono::milliseconds& timeout) {
                             return r.wait2(timeout);
                     }, "Wait for the specified milliseconds for the run to complete")
-        .def("state", &xrt::run::state, "Check the current state of a run object")
-        .def("add_callback", &xrt::run::add_callback, "Add a callback function for run state");
+        .def("state", &xrt::run::state, "Return the current execution state of the run.")
+        .def("return_code", &xrt::run::return_code,
+             "Get the return code from a PS kernel run.")
+        .def("stop", [](xrt::run& r) {
+            py::gil_scoped_release release;
+            r.stop();
+        }, "Stop the run at the next safe iteration.")
+        .def("abort", [](xrt::run& r) {
+            py::gil_scoped_release release;
+            return r.abort();
+        }, "Abort a scheduled run command. Returns the final state.")
+        .def("add_callback", &xrt::run::add_callback, "Register a callback to be invoked when the run reaches the requested state.")
+        .def("get_ctrl_scratchpad_bo", &xrt::run::get_ctrl_scratchpad_bo,
+             "Get the control scratchpad buffer object associated with this run")
+        .def("__call__", [](xrt::run& r, py::args args) -> xrt::run& {
+                             return start_run_from_pyargs(r, args);
+                         },
+             "Set kernel arguments and start (or restart) this run.");
 
     py::class_<xrt::kernel> pyker(m, "kernel", "Represents a set of instances matching a specified name");
 
@@ -228,46 +568,26 @@ PYBIND11_MODULE(pyxrt, m) {
         .value("none", xrt::kernel::cu_access_mode::none)
         .export_values();
 
+    bind_kernel_device_compat(pyker);
 
-    pyker.def(py::init([](const xrt::device& d, const xrt::uuid& u, const std::string& n,
-                          xrt::kernel::cu_access_mode m) {
-                           return new xrt::kernel(d, u, n, m);
-                       }))
-  	    .def(py::init([](const xrt::device& d, const xrt::uuid& u, const std::string& n) {
-                               return new xrt::kernel(d, u, n);
-                       }))
+    pyker
         .def(py::init([](const xrt::hw_context& ctx, const std::string& n) {
-                               return new xrt::kernel(ctx, n);
-                       }))
+                           py::gil_scoped_release release;
+                           return new xrt::kernel(ctx, n);
+                       }),
+              py::arg("hw_context"), py::arg("name"),
+              "Create kernel from hardware context and name (recommended)")
         .def("__call__", [](xrt::kernel& k, py::args args) -> xrt::run {
-                             int i = 0;
-                             xrt::run r(k);
-
-                             for (auto item : args) {
-                                 try {
-                                     r.set_arg(i, item.cast<xrt::bo>());
-                                 }
-                                 catch (std::exception e) {  }
-
-                                 try {
-                                     r.set_arg<int>(i, item.cast<int>());
-                                 }
-                                 catch (std::exception e) {  }
-
-                                 i++;
-                             }
-
-                             r.start();
-                             return r;
+                             return start_kernel_from_pyargs(k, args);
                          })
-        .def("group_id", &xrt::kernel::group_id, "Get the memory bank group id of an kernel argument");
-
+        .def("group_id", &xrt::kernel::group_id, "Get the memory-group identifier for a kernel argument.");
 
 /*
  *
  * xrt::bo
  *
  */
+
     py::class_<xrt::bo> pybo(m, "bo", "Represents a buffer object");
 
     py::enum_<xrt::bo::flags>(pybo, "flags", "Buffer object creation flags")
@@ -279,8 +599,24 @@ PYBIND11_MODULE(pyxrt, m) {
         .value("svm", xrt::bo::flags::svm)
         .export_values();
 
-    pybo.def(py::init<xrt::device, size_t, xrt::bo::flags, xrt::memory_group>(), "Create a buffer object with specified properties")
-        .def(py::init<xrt::bo, size_t, size_t>(), "Create a sub-buffer of an existing buffer object of specifed size and offset in the existing buffer")
+    py::class_<xrt::bo::async_handle> pyasynchdl(pybo, "async_handle",
+        "Handle for an asynchronous buffer object operation.");
+
+    pyasynchdl.def("wait", [](xrt::bo::async_handle& h) {
+        py::gil_scoped_release release;
+        h.wait();
+    }, "Wait for the asynchronous operation to complete.");
+
+    pybo.def(py::init<xrt::device, size_t, xrt::bo::flags, xrt::memory_group>(),
+             py::arg("device"), py::arg("size"), py::arg("flags"), py::arg("group"),
+             "Create a buffer object on a device with the requested size, flags, and memory group.")
+        .def(py::init<xrt::hw_context, size_t, xrt::bo::flags, xrt::memory_group>(),
+             py::arg("hwctx"), py::arg("size"), py::arg("flags"), py::arg("group"),
+             "Create a buffer object in a hardware context with the requested size, flags, and memory group.")
+        .def(py::init<xrt::hw_context, size_t, xrt::memory_group>(),
+             py::arg("hwctx"), py::arg("size"), py::arg("group"),
+             "Create a buffer object in a hardware context using default flags.")
+        .def(py::init<xrt::bo, size_t, size_t>(), "Create a sub-buffer view of an existing buffer object with the requested size and offset.")
         .def("write", ([](xrt::bo &b, py::buffer pyb, size_t seek)  {
                            py::buffer_info info = pyb.request();
                            b.write(info.ptr, info.itemsize * info.size , seek);
@@ -308,6 +644,7 @@ PYBIND11_MODULE(pyxrt, m) {
  * xrt::xclbin::ip, xrt::xclbin::kernel
  *
  */
+
     py::class_<xrt::xclbin> pyxclbin(m, "xclbin", "Represents an xclbin and provides APIs to access meta data");
     py::class_<xrt::xclbin::ip> pyxclbinip(pyxclbin, "xclbinip");
     py::bind_vector<std::vector<xrt::xclbin::ip>>(m, "xclbinip_vector");
@@ -330,6 +667,7 @@ PYBIND11_MODULE(pyxrt, m) {
         .def("get_size_kb", &xrt::xclbin::mem::get_size_kb, "Get the size of the memory in KB")
         .def("get_used", &xrt::xclbin::mem::get_used, "Get used status of the memory")
         .def("get_index", &xrt::xclbin::mem::get_index, "Get the index of the memory");
+
 /*
  *
  * xrt::xclbin
@@ -372,9 +710,6 @@ PYBIND11_MODULE(pyxrt, m) {
             return new xrt::aie::program(xe); }))
         .def("get_partition_size", &xrt::aie::program::get_partition_size,
              "Required partition size to run the program");
-    
-
-
 
     /*
     *
@@ -382,23 +717,24 @@ PYBIND11_MODULE(pyxrt, m) {
     * 
     */
 
-    py::class_<xrt::module> pymodule(m, "module", "Functions an application will execute in hardware");
+    py::class_<xrt::module> pymodule(m, "module", "Executable hardware module created from an ELF image.");
 
     pymodule
         .def(py::init([](xrt::elf& xe) {
                 return new xrt::module(xe);
-        }))
-        // constructor with impl, not sure check xrt_module.h
-        .def("get_hw_context", &xrt::module::get_hw_context, "Get hw context of module");
+        }), py::arg("elf"), "Create a hardware module from an ELF object.")
+        .def("get_hw_context", &xrt::module::get_hw_context,
+             "Get the hardware context associated with the module.");
 
     /*
     *
     * xrt::ext
     * 
     */
-    py::module_ ext = m.def_submodule("ext", "Submodule for external");
 
-    py::class_<xrt::ext::bo, xrt::bo> pyextbo(ext, "bo", "Represents an enhanced version of xrt::bo with support for access mode");
+    py::module_ ext = m.def_submodule("ext", "Extended XRT functionality.");
+
+    py::class_<xrt::ext::bo, xrt::bo> pyextbo(ext, "bo", "Extended buffer object with explicit sharing and access controls.");
 
     py::enum_<xrt::ext::bo::access_mode>(ext, "access_mode", "External buffer access mode")
         .value("none", xrt::ext::bo::access_mode::none)
@@ -429,40 +765,58 @@ PYBIND11_MODULE(pyxrt, m) {
     pyextbo
         .def(py::init([](const xrt::device& device, void* userptr, size_t sz, xrt::ext::bo::access_mode access) {
             return new xrt::ext::bo(device, userptr, sz, access);
-        }))
+        }),
+        py::arg("device"), py::arg("userptr"), py::arg("size"), py::arg("access"),
+        "Create an extended buffer on a device from an existing user pointer with the requested access mode.")
         .def(py::init([](const xrt::device& device, void* userptr, size_t sz){
             return new xrt::ext::bo(device, userptr, sz);
-        }))
+        }),
+        py::arg("device"), py::arg("userptr"), py::arg("size"),
+        "Create an extended buffer on a device from an existing user pointer.")
         .def(py::init([](const xrt::device& device, size_t sz, xrt::ext::bo::access_mode access) {
             return new xrt::ext::bo(device, sz, access);
-        }))
+        }),
+        py::arg("device"), py::arg("size"), py::arg("access"),
+        "Create an extended buffer on a device with the requested access mode.")
         .def(py::init([](const xrt::device& device, size_t sz) {
             return new xrt::ext::bo(device, sz);
-        }))
+        }),
+        py::arg("device"), py::arg("size"),
+        "Create an extended buffer on a device with the default access mode.")
         .def(py::init([](const xrt::device& device, xrt::pid_type pid, xrt::bo::export_handle ehdl) {
             return new xrt::ext::bo(device, pid, ehdl);
-        }))
+        }),
+        py::arg("device"), py::arg("pid"), py::arg("export_handle"),
+        "Import an extended buffer from another process using an exported handle.")
         .def(py::init([](const xrt::hw_context& hwctx, size_t sz, xrt::ext::bo::access_mode access) {
             return new xrt::ext::bo(hwctx, sz, access);
-        }))
+        }),
+        py::arg("hwctx"), py::arg("size"), py::arg("access"),
+        "Create an extended buffer in a hardware context with the requested access mode.")
         .def(py::init([](const xrt::hw_context& hwctx, size_t sz) {
             return new xrt::ext::bo(hwctx, sz);
-        }))
+        }),
+        py::arg("hwctx"), py::arg("size"),
+        "Create an extended buffer in a hardware context with the default access mode.")
         .def(py::init([](const xrt::hw_context& hwctx, xrt::pid_type pid, xrt::bo::export_handle ehdl) {
             return new xrt::ext::bo(hwctx, pid, ehdl);
-        }))
-        ;
+        }),
+        py::arg("hwctx"), py::arg("pid"), py::arg("export_handle"),
+        "Import an extended buffer into a hardware context from another process using an exported handle.");
     
-    py::class_<xrt::ext::kernel, xrt::kernel> pyextkernel(ext, "kernel", "Represents an external kernel object");
+    py::class_<xrt::ext::kernel, xrt::kernel> pyextkernel(ext, "kernel", "Extended kernel object for module-backed and shared workflows.");
 
     pyextkernel
         .def(py::init([](const xrt::hw_context& ctx, const xrt::module& mod, const std::string& name) {
             return new xrt::ext::kernel(ctx, mod, name);
-        }))
+        }),
+        py::arg("hwctx"), py::arg("module"), py::arg("name"),
+        "Create an extended kernel from a hardware context, a module, and a kernel name.")
         .def(py::init([](const xrt::hw_context& ctx, const std::string& name) {
             return new xrt::ext::kernel(ctx, name);
-        }))
-        ;
+        }),
+        py::arg("hwctx"), py::arg("name"),
+        "Create an extended kernel from a hardware context and a kernel name.");
 
     /*
     *
@@ -470,18 +824,18 @@ PYBIND11_MODULE(pyxrt, m) {
     * 
     */
 
-    py::class_<xrt::runlist> pyrunlist(m, "runlist", "Represents a list of runs to be executed");
+    py::class_<xrt::runlist> pyrunlist(m, "runlist", "Ordered collection of runs executed as a unit.");
     
     pyrunlist
         .def(py::init([](){
             return new xrt::runlist();
-        }))
+        }), "Create an empty runlist.")
         .def(py::init([](const xrt::hw_context& hwctx) {
             return new xrt::runlist(hwctx);
-        }))
+        }), py::arg("hwctx"), "Create a runlist associated with a hardware context.")
         .def("add", ([](xrt::runlist &r, const xrt::run& run) {
             r.add(run);
-        }), "Add a run to the runlist")
+        }), py::arg("run"), "Add a run to the runlist")
         .def("execute", ([](xrt::runlist &r) {
             r.execute();
         }), "Execute all runs in the runlist")
@@ -490,7 +844,402 @@ PYBIND11_MODULE(pyxrt, m) {
         }), "Wait for all runs in the runlist to complete")
         .def("wait", ([](xrt::runlist &r, const std::chrono::milliseconds& timeout) {
             return r.wait(timeout);
-        }), "Wait for the specified timeout for the runlist to complete");
-        
-}
+        }), py::arg("timeout"),
+        "Wait for the specified timeout for the runlist to complete");
 
+/*
+ *
+ * xrt::mailbox
+ *
+ */
+
+    py::class_<xrt::mailbox> pymailbox(m, "mailbox",
+        "Experimental kernel mailbox for reading/writing kernel arguments.");
+
+    pymailbox
+        .def(py::init([](const xrt::run& r) {
+            py::gil_scoped_release release;
+            return new xrt::mailbox(r);
+        }), py::arg("run"),
+        "Construct a mailbox from a run object associated with a mailbox-enabled kernel.")
+        .def("read", [](xrt::mailbox& mb) {
+            py::gil_scoped_release release;
+            mb.read();
+        }, "Request the kernel to update the mailbox copy of arguments.")
+        .def("write", [](xrt::mailbox& mb) {
+            py::gil_scoped_release release;
+            mb.write();
+        }, "Request the kernel to copy mailbox arguments to the kernel.")
+        .def("get_arg", [](const xrt::mailbox& mb, int index) {
+            auto arg = mb.get_arg(index);
+            return py::bytes(static_cast<const char*>(arg.first), arg.second);
+        }, py::arg("index"),
+        "Get the mailbox copy of a kernel argument as bytes.")
+        .def("set_arg", [](xrt::mailbox& mb, int index, xrt::bo& boh) {
+            py::gil_scoped_release release;
+            mb.set_arg(index, boh);
+        }, py::arg("index"), py::arg("bo"),
+        "Set a buffer object argument in the mailbox.")
+        .def("set_arg", [](xrt::mailbox& mb, int index, int value) {
+            py::gil_scoped_release release;
+            mb.set_arg(index, value);
+        }, py::arg("index"), py::arg("value"),
+        "Set a scalar argument in the mailbox.")
+        .def("set_arg", [](xrt::mailbox& mb, const std::string& name, int value) {
+            py::gil_scoped_release release;
+            mb.set_arg(name, value);
+        }, py::arg("name"), py::arg("value"),
+        "Set a named scalar argument in the mailbox.")
+        .def("set_arg", [](xrt::mailbox& mb, const std::string& name, xrt::bo& boh) {
+            py::gil_scoped_release release;
+            mb.set_arg(name, boh);
+        }, py::arg("name"), py::arg("bo"),
+        "Set a named buffer object argument in the mailbox.");
+
+/*
+ *
+ * xrt::error
+ *
+ */
+
+    py::class_<xrt::error> pyerror(m, "async_error",
+        "Experimental XRT asynchronous error retrieval.");
+
+    pyerror
+        .def(py::init([](const xrt::device& d, xrtErrorClass ecl) {
+            return new xrt::error(d, ecl);
+        }), py::arg("device"), py::arg("error_class"),
+        "Get the last asynchronous error of the given class from a device.")
+        .def(py::init([](xrtErrorCode code, xrtErrorTime timestamp) {
+            return new xrt::error(code, timestamp);
+        }), py::arg("error_code"), py::arg("timestamp"),
+        "Construct an error from an error code and timestamp.")
+        .def("get_timestamp", &xrt::error::get_timestamp,
+             "Get the timestamp for this error.")
+        .def("get_error_code", &xrt::error::get_error_code,
+             "Get the underlying XRT error code.")
+        .def("to_string", &xrt::error::to_string,
+             "Convert the error to a formatted string.");
+
+/*
+ *
+ * xrt::profile
+ *
+ */
+
+    py::module_ profile = m.def_submodule("profile",
+        "Experimental user-defined profiling markers for XRT trace visualization.");
+
+    py::class_<xrt::profile::user_range> pyuserrange(profile, "user_range",
+        "Experimental user-defined time range for profiling.");
+
+    pyuserrange
+        .def(py::init<>(), "Create a user range; call start() to begin timing.")
+        .def(py::init([](const std::string& label) {
+            return new xrt::profile::user_range(label.c_str());
+        }), py::arg("label"),
+        "Create a user range and start timing immediately.")
+        .def(py::init([](const std::string& label, const std::string& tooltip) {
+            return new xrt::profile::user_range(label.c_str(), tooltip.c_str());
+        }), py::arg("label"), py::arg("tooltip"),
+        "Create a user range with label and tooltip, and start timing immediately.")
+        .def("start", [](xrt::profile::user_range& r, const std::string& label) {
+            r.start(label.c_str());
+        }, py::arg("label"),
+        "Mark the start of a user-defined profiling range.")
+        .def("start", [](xrt::profile::user_range& r, const std::string& label,
+                         const std::string& tooltip) {
+            r.start(label.c_str(), tooltip.c_str());
+        }, py::arg("label"), py::arg("tooltip"),
+        "Mark the start of a user-defined profiling range with tooltip.")
+        .def("end", &xrt::profile::user_range::end,
+             "Mark the end of a user-defined profiling range.");
+
+    py::class_<xrt::profile::user_event> pyuserevent(profile, "user_event",
+        "Experimental user-defined event marker for profiling.");
+
+    pyuserevent
+        .def(py::init<>(), "Create a user event marker.")
+        .def("mark", [](xrt::profile::user_event& e) {
+            e.mark();
+        }, "Mark the current time.")
+        .def("mark", [](xrt::profile::user_event& e, const std::string& label) {
+            e.mark(label.c_str());
+        }, py::arg("label"),
+        "Mark the current time with a label.")
+        .def("mark_time_ns", [](xrt::profile::user_event& e, int64_t time_ns) {
+            e.mark_time_ns(std::chrono::nanoseconds{time_ns});
+        }, py::arg("time_ns"),
+        "Mark a custom time in nanoseconds since application start.")
+        .def("mark_time_ns", [](xrt::profile::user_event& e, int64_t time_ns,
+                                const std::string& label) {
+            e.mark_time_ns(std::chrono::nanoseconds{time_ns}, label.c_str());
+        }, py::arg("time_ns"), py::arg("label"),
+        "Mark a custom time in nanoseconds with a label.");
+
+/*
+ *
+ * xrt::graph
+ *
+ */
+
+    py::class_<xrt::graph> pygraph(m, "graph", "Represents an AIE graph execution object");
+
+    py::enum_<xrt::graph::access_mode>(pygraph, "access_mode", "Graph access mode")
+        .value("exclusive", xrt::graph::access_mode::exclusive)
+        .value("primary",   xrt::graph::access_mode::primary)
+        .value("shared",    xrt::graph::access_mode::shared)
+        .export_values();
+
+    pygraph
+        .def(py::init([](const xrt::hw_context& ctx, const std::string& name) {
+            py::gil_scoped_release release;
+            return new xrt::graph(ctx, name);
+        }),
+        py::arg("ctx"), py::arg("name"),
+        "Create a graph from a hardware context and graph name.")
+        .def(py::init([](const xrt::hw_context& ctx, const std::string& name,
+                         xrt::graph::access_mode mode) {
+            py::gil_scoped_release release;
+            return new xrt::graph(ctx, name, mode);
+        }),
+        py::arg("ctx"), py::arg("name"), py::arg("mode"),
+        "Create a graph with an explicit access mode.")
+        .def("reset", [](xrt::graph& g) {
+            py::gil_scoped_release release;
+            g.reset();
+        }, "Reset the graph by disabling tiles and enabling tile reset.")
+        .def("get_timestamp", &xrt::graph::get_timestamp,
+             "Get the current graph timestamp in AIE cycles.")
+        .def("gmio_bank_id", &xrt::graph::gmio_bank_id, py::arg("gmio_name"),
+             "Get the memory bank index for a named GMIO port.")
+        .def("run", [](xrt::graph& g, uint32_t iterations) {
+            py::gil_scoped_release release;
+            g.run(iterations);
+        }, py::arg("iterations") = 0,
+        "Start graph execution.")
+        .def("wait", [](xrt::graph& g, std::chrono::milliseconds timeout_ms) {
+            py::gil_scoped_release release;
+            g.wait(timeout_ms);
+        }, py::arg("timeout_ms"),
+        "Wait for graph completion or until timeout.")
+        .def("wait", [](xrt::graph& g, uint64_t cycles) {
+            py::gil_scoped_release release;
+            g.wait(cycles);
+        }, py::arg("cycles") = 0,
+        "Wait for the given AIE cycles then suspend the graph.")
+        .def("suspend", [](xrt::graph& g) {
+            py::gil_scoped_release release;
+            g.suspend();
+        }, "Suspend a running graph.")
+        .def("resume", [](xrt::graph& g) {
+            py::gil_scoped_release release;
+            g.resume();
+        }, "Resume a suspended graph.")
+        .def("end", [](xrt::graph& g, uint64_t cycles) {
+            py::gil_scoped_release release;
+            g.end(cycles);
+        }, py::arg("cycles") = 0,
+        "Wait for the given AIE cycles then terminate the graph.")
+        .def("update", [](xrt::graph& g, const std::string& port_name, py::buffer data) {
+            py::buffer_info info = data.request();
+            g.update(port_name, info.ptr, static_cast<size_t>(info.itemsize * info.size));
+        }, py::arg("port_name"), py::arg("data"),
+        "Update a runtime parameter port.")
+        .def("read", [](xrt::graph& g, const std::string& port_name, size_t size) {
+            py::array_t<char> result(size);
+            py::buffer_info info = result.request();
+            g.read(port_name, info.ptr, size);
+            return result;
+        }, py::arg("port_name"), py::arg("size"),
+        "Read a runtime parameter port.");
+
+/*
+ *
+ * xrt::aie::bo
+ *
+ */
+
+    py::module_ aie = m.def_submodule("aie", "AIE-specific XRT functionality.");
+
+    py::class_<xrt::aie::bo, xrt::bo> pyaiebo(aie, "bo",
+        "AIE buffer object supporting GMIO synchronous and asynchronous transfers.");
+
+    pyaiebo
+        .def(py::init<xrt::device, size_t, xrt::bo::flags, xrt::memory_group>(),
+             py::arg("device"), py::arg("size"), py::arg("flags"), py::arg("group"),
+             "Create a buffer object on a device with the requested size, flags, and memory group.")
+        .def(py::init<xrt::hw_context, size_t, xrt::bo::flags, xrt::memory_group>(),
+             py::arg("hwctx"), py::arg("size"), py::arg("flags"), py::arg("group"),
+             "Create a buffer object in a hardware context with the requested size, flags, and memory group.")
+        .def(py::init<xrt::hw_context, size_t, xrt::memory_group>(),
+             py::arg("hwctx"), py::arg("size"), py::arg("group"),
+             "Create a buffer object in a hardware context using default flags.")
+        .def("sync", [](xrt::aie::bo& b, const std::string& port,
+                        xclBOSyncDirection dir, size_t sz, size_t offset) {
+            py::gil_scoped_release release;
+            b.sync(port, dir, sz, offset);
+        }, py::arg("port"), py::arg("direction"), py::arg("size"), py::arg("offset"),
+        "Synchronize buffer data with a named GMIO port.")
+        .def("sync", [](xrt::aie::bo& b, const std::string& port, xclBOSyncDirection dir) {
+            py::gil_scoped_release release;
+            b.sync(port, dir);
+        }, py::arg("port"), py::arg("direction"),
+        "Sync entire buffer content with a named GMIO port.")
+        .def("async_", [](xrt::aie::bo& b, const std::string& port,
+                         xclBOSyncDirection dir, size_t sz, size_t offset) {
+            py::gil_scoped_release release;
+            return b.async(port, dir, sz, offset);
+        }, py::arg("port"), py::arg("direction"), py::arg("size"), py::arg("offset"),
+        "Asynchronously transfer buffer data with a named GMIO port.");
+
+/*
+ *
+ * xrt::aie::profiling
+ *
+ */
+
+    py::class_<xrt::aie::profiling> pyprofiling(aie, "profiling",
+        "AIE performance profiling using PLIO and GMIO objects.");
+
+    py::enum_<xrt::aie::profiling::profiling_option>(pyprofiling, "profiling_option",
+        "AIE profiling measurement options")
+        .value("io_total_stream_running_to_idle_cycles",
+               xrt::aie::profiling::profiling_option::io_total_stream_running_to_idle_cycles)
+        .value("io_stream_start_to_bytes_transferred_cycles",
+               xrt::aie::profiling::profiling_option::io_stream_start_to_bytes_transferred_cycles)
+        .value("io_stream_start_difference_cycles",
+               xrt::aie::profiling::profiling_option::io_stream_start_difference_cycles)
+        .value("io_stream_running_event_count",
+               xrt::aie::profiling::profiling_option::io_stream_running_event_count)
+        .export_values();
+
+    pyprofiling
+        .def(py::init([](const xrt::hw_context& hwctx) {
+            py::gil_scoped_release release;
+            return new xrt::aie::profiling(hwctx);
+        }), py::arg("hwctx"),
+        "Create a profiling object for an AIE hardware context.")
+        .def("start", [](const xrt::aie::profiling& p, xrt::aie::profiling::profiling_option option,
+                         const std::string& port1, const std::string& port2, uint32_t value) {
+            py::gil_scoped_release release;
+            return p.start(option, port1, port2, value);
+        }, py::arg("option"), py::arg("port1"), py::arg("port2"), py::arg("value"),
+        "Configure performance counters and start profiling.")
+        .def("read", [](const xrt::aie::profiling& p) {
+            py::gil_scoped_release release;
+            return p.read();
+        }, "Read the current performance counter value.")
+        .def("stop", [](const xrt::aie::profiling& p) {
+            py::gil_scoped_release release;
+            p.stop();
+        }, "Stop profiling and release hardware counter resources.");
+
+/*
+ *
+ * xrt::aie::device
+ *
+ */
+
+    py::class_<xrt::aie::device, xrt::device> pyaiedevice(aie, "device",
+        "Represents an AIE-extended device.");
+
+    py::enum_<xrt::aie::access_mode>(aie, "access_mode", "AIE array access mode")
+        .value("exclusive", xrt::aie::access_mode::exclusive)
+        .value("primary", xrt::aie::access_mode::primary)
+        .value("shared", xrt::aie::access_mode::shared)
+        .export_values();
+
+    py::enum_<xrt::aie::device::thermal_type>(pyaiedevice, "thermal_type",
+        "AIE thermal parameter type")
+        .value("temperature", xrt::aie::device::thermal_type::temperature)
+        .export_values();
+
+    pyaiedevice
+        .def(py::init([](unsigned int index, xrt::aie::access_mode am) {
+            py::gil_scoped_release release;
+            return new xrt::aie::device(index, am);
+        }), py::arg("index"), py::arg("access_mode") = xrt::aie::access_mode::primary,
+        "Open a device by index with specified AIE access mode.")
+        .def("reset_array", [](xrt::aie::device& d) {
+            py::gil_scoped_release release;
+            d.reset_array();
+        }, "Reset the AIE array.")
+        .def("get_thermal", &xrt::aie::device::get_thermal, py::arg("thermal"),
+             "Read a thermal value from the AIE device.")
+        .def("set_thermal_threshold", &xrt::aie::device::set_thermal_threshold,
+             py::arg("thermal"), py::arg("value"),
+             "Set a thermal threshold on the AIE device.")
+        .def("read_aie_mem", [](const xrt::aie::device& d, pid_t pid, uint16_t ctx_id,
+                                uint16_t col, uint16_t row, uint32_t offset, uint32_t size) {
+            py::gil_scoped_release release;
+            auto data = d.read_aie_mem(pid, ctx_id, col, row, offset, size);
+            return py::bytes(data.data(), data.size());
+        }, py::arg("pid"), py::arg("context_id"), py::arg("col"), py::arg("row"),
+           py::arg("offset"), py::arg("size"),
+        "Read bytes from an AIE tile's L1/L2 memory.")
+        .def("write_aie_mem", [](xrt::aie::device& d, pid_t pid, uint16_t ctx_id,
+                                 uint16_t col, uint16_t row, uint32_t offset, py::bytes data) {
+            py::gil_scoped_release release;
+            std::string s = data;
+            return d.write_aie_mem(pid, ctx_id, col, row, offset, {s.begin(), s.end()});
+        }, py::arg("pid"), py::arg("context_id"), py::arg("col"), py::arg("row"),
+           py::arg("offset"), py::arg("data"),
+        "Write bytes to an AIE tile's L1/L2 memory.")
+        .def("read_aie_reg", [](const xrt::aie::device& d, pid_t pid, uint16_t ctx_id,
+                                uint16_t col, uint16_t row, uint32_t reg_addr) {
+            py::gil_scoped_release release;
+            return d.read_aie_reg(pid, ctx_id, col, row, reg_addr);
+        }, py::arg("pid"), py::arg("context_id"), py::arg("col"), py::arg("row"),
+           py::arg("reg_addr"),
+        "Read a register from an AIE tile.")
+        .def("write_aie_reg", [](xrt::aie::device& d, pid_t pid, uint16_t ctx_id,
+                                 uint16_t col, uint16_t row, uint32_t reg_addr, uint32_t reg_val) {
+            py::gil_scoped_release release;
+            return d.write_aie_reg(pid, ctx_id, col, row, reg_addr, reg_val);
+        }, py::arg("pid"), py::arg("context_id"), py::arg("col"), py::arg("row"),
+           py::arg("reg_addr"), py::arg("reg_val"),
+        "Write a value to an AIE tile register.");
+
+/*
+ *
+ * xrt::ip
+ *
+ */
+
+    py::class_<xrt::ip> pyip(m, "ip",
+        "Experimental custom IP register-level access.");
+
+    py::class_<xrt::ip::interrupt> pyipintr(pyip, "interrupt",
+        "Experimental IP interrupt event handle.");
+
+    pyipintr
+        .def("enable", &xrt::ip::interrupt::enable,
+             "Enable IP interrupt notification from the IP.")
+        .def("disable", &xrt::ip::interrupt::disable,
+             "Disable IP interrupt notification from the IP.")
+        .def("wait", [](xrt::ip::interrupt& intr) {
+            py::gil_scoped_release release;
+            intr.wait();
+        }, "Block until an interrupt is received from the IP.")
+        .def("wait", [](xrt::ip::interrupt& intr, const std::chrono::milliseconds& timeout) {
+            py::gil_scoped_release release;
+            return intr.wait(timeout);
+        }, py::arg("timeout"),
+        "Wait up to timeout milliseconds for an IP interrupt.");
+
+    pyip
+        .def(py::init<>(), "Create an empty ip handle.")
+        .def(py::init([](const xrt::hw_context& ctx, const std::string& name) {
+            py::gil_scoped_release release;
+            return new xrt::ip(ctx, name);
+        }), py::arg("ctx"), py::arg("name"),
+        "Create an IP object from a hardware context and IP name.")
+        .def("write_register", &xrt::ip::write_register, py::arg("offset"), py::arg("data"),
+             "Write a 32-bit value to a register at the given offset.")
+        .def("read_register", &xrt::ip::read_register, py::arg("offset"),
+             "Read a 32-bit value from a register at the given offset.")
+        .def("create_interrupt_notify", &xrt::ip::create_interrupt_notify,
+             "Create an interrupt notification handle for this IP.");
+
+}

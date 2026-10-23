@@ -52,6 +52,7 @@ enum class key_type
   pcie_express_lane_width_max,
   pcie_bdf,
   pcie_id,
+  device_id_str,
 
   instance,
   edge_vendor,
@@ -129,6 +130,7 @@ enum class key_type
   aie_mem_info_sysfs,
 
   total_cols,
+  npu_load,
   aie_status_version,
   aie_tiles_stats,
   aie_tiles_status_info,
@@ -332,6 +334,7 @@ enum class key_type
   firmware_log_state,
   firmware_log_config,
   archive_path,
+  auto_coredump,
   frame_boundary_preemption,
   debug_ip_layout_path,
   debug_ip_layout,
@@ -349,7 +352,9 @@ enum class key_type
 
   aie_read,
   aie_write,
-  aie_coredump
+  aie_coredump,
+
+  flr_reset
 };
 
 struct pcie_vendor : request
@@ -382,6 +387,26 @@ struct pcie_device : request
   to_string(result_type val)
   {
     return boost::str(boost::format("0x%x") % val);
+  }
+};
+
+// Human-readable device/part id string (e.g. "xc2ve3858" for the aie2ps/npu12
+// of_plat part).  Only implemented by shims that can source it (from the
+// device-tree compatible); returns empty elsewhere so callers can fall back to
+// the numeric pcie_device id.
+struct device_id_str : request
+{
+  using result_type = std::string;
+  static const key_type key = key_type::device_id_str;
+  static const char* name() { return "devid_str"; }
+
+  std::any
+  get(const device*) const override = 0;
+
+  static std::string
+  to_string(const result_type& value)
+  {
+    return value;
   }
 };
 
@@ -497,6 +522,17 @@ struct pcie_bdf : request
       (boost::format("%04x:%02x:%02x.%01x") % std::get<0>(value) %
        std::get<1>(value) % std::get<2>(value) % std::get<3>(value));
   }
+
+  static xrt::uuid
+  to_uuid(const result_type& bdf)
+  {
+    xuid_t uid = {};
+    auto* ptr = reinterpret_cast<uint8_t*>(&uid);
+    std::apply([&ptr](const auto&... fields) {
+      ((std::memcpy(ptr, &fields, sizeof(fields)), ptr += sizeof(fields)), ...);
+    }, bdf);
+    return {uid};
+  }
 };
 
 /**
@@ -593,6 +629,7 @@ struct xrt_smi_lists : request
     validate_tests,
     examine_reports,
     configure_option_options,
+    subcommands,
   };
   using result_type = std::vector<std::tuple<std::string, std::string, std::string>>;
   static const key_type key = key_type::xrt_smi_lists;
@@ -1721,6 +1758,16 @@ struct total_cols : request
   get(const device*) const override = 0;
 };
 
+// NPU utilization as a percentage (0-100), sourced from the driver
+struct npu_load : request
+{
+  using result_type = uint32_t;
+  static const key_type key = key_type::npu_load;
+
+  virtual std::any
+  get(const device*) const override = 0;
+};
+
 // Retrive aie status version
 // We use binary parser for parsing info from driver
 // This version is used as handshake b/w userspace and driver
@@ -1806,6 +1853,8 @@ struct aie_partition_info : request
     uint64_t    command_completions = 0;
     uint64_t    migrations = 0;
     uint64_t    preemptions = 0;
+    uint64_t    preemption_frame_event = 0;
+    uint64_t    preemption_layer_event = 0;
     uint64_t    errors = 0;
     uint64_t    pasid = 0;
     qos_info    qos {};
@@ -1824,6 +1873,8 @@ struct aie_partition_info : request
   parse_priority_status(const uint64_t prio_status)
   {
     switch(prio_status) {
+      case 320: //0x140
+        return "Soft Realtime";
       case 256: //0x100
         return "Realtime";
       case 384: //0x180
@@ -2001,8 +2052,10 @@ struct firmware_version : request
 struct cert_firmware_version : request
 {
   struct data {
-    std::string date;
-    std::string git_hash;
+    uint32_t major;
+    uint32_t minor;
+    uint32_t hotfix;
+    uint32_t build;
   };
 
   using result_type = data;
@@ -3938,15 +3991,15 @@ struct performance_mode : request
   {
     switch(status) {
       case 0:
-        return "Default";
+        return "default";
       case 1:
-        return "Powersaver";
+        return "powersaver";
       case 2:
-        return "Balanced";
+        return "balanced";
       case 3:
-        return "Performance";
+        return "performance";
       case 4:
-        return "Turbo";
+        return "turbo";
       default:
         throw xrt_core::system_error(EINVAL, "Invalid performance status: " + std::to_string(status));
     }
@@ -4097,10 +4150,24 @@ struct archive_path : request
   get(const device*) const override = 0;
 };
 
+struct auto_coredump : request
+{
+  using result_type = uint32_t;
+  using value_type = uint32_t;
+
+  static const key_type key = key_type::auto_coredump;
+
+  std::any
+  get(const device*) const override = 0;
+
+  void
+  put(const device*, const std::any&) const override = 0;
+};
+
 /*
  * this request force enables or disables frame boundary pre-emption globally
  * 1: enable; 0: disable
-*/
+ */
 struct frame_boundary_preemption : request
 {
   using result_type = uint32_t;  // get value type
@@ -4284,6 +4351,22 @@ struct aie_coredump : request
 
   std::any
   get(const device*, const std::any&) const override = 0;
+};
+
+// Trigger PCI function-level reset (FLR). result_type is true when successful.
+struct flr_reset : request
+{
+  using result_type = bool;
+  static const key_type key = key_type::flr_reset;
+
+  virtual std::any
+  get(const device*) const override = 0;
+
+  static std::string
+  to_string(result_type value)
+  {
+    return value ? "true" : "false";
+  }
 };
 } // query
 

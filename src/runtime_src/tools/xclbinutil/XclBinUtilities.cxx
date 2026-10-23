@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2018, 2020-2023 Xilinx, Inc. All rights reserved.
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
-
+// Copyright (C) 2018-2023 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "XclBinUtilities.h"
 
 #include "Section.h"                           // TODO: REMOVE SECTION INCLUDE
@@ -15,33 +14,30 @@
 #include <future>
 #include <set>
 
-#if (BOOST_VERSION >= 106400)
+#ifdef _WIN32
+# define _WIN32_WINNT 0x0501
+# pragma warning (disable : 4244) // Addresses Boost conversion Windows build warnings
+#endif
 
-# ifdef _WIN32
-#  define _WIN32_WINNT 0x0501
-#  pragma warning (disable : 4244) // Addresses Boost conversion Windows build warnings
-# endif
-
-# include <boost/asio/io_context.hpp>
-# if (BOOST_VERSION < 108600)
-#  include <boost/process.hpp>
-#  include <boost/process/child.hpp>
-#  include <boost/process/env.hpp>
-#  include <boost/process/search_path.hpp>
-# else
-#  include <boost/process/v1/args.hpp>
-#  include <boost/process/v1/async.hpp>
-#  include <boost/process/v1/child.hpp>
-#  include <boost/process/v1/env.hpp>
-#  include <boost/process/v1/io.hpp>
-#  include <boost/process/v1/search_path.hpp>
-# endif
+#include <boost/asio/io_context.hpp>
+#if (BOOST_VERSION < 108600)
+# include <boost/process.hpp>
+# include <boost/process/child.hpp>
+# include <boost/process/env.hpp>
+# include <boost/process/search_path.hpp>
+#else
+# include <boost/process/v1/args.hpp>
+# include <boost/process/v1/async.hpp>
+# include <boost/process/v1/child.hpp>
+# include <boost/process/v1/env.hpp>
+# include <boost/process/v1/io.hpp>
+# include <boost/process/v1/search_path.hpp>
 #endif
 
 #ifdef _WIN32
-  #include <winsock2.h>
+# include <winsock2.h>
 #else
-  #include <arpa/inet.h>
+# include <arpa/inet.h>
 #endif
 
 namespace XUtil = XclBinUtilities;
@@ -240,6 +236,23 @@ XclBinUtilities::safeStringCopy(char* _destBuffer,
   memcpy(_destBuffer, _source.c_str(), bytesToCopy);
 }
 
+const char*
+XclBinUtilities::bounded_mpo_cstr(const void* pHdr, uint32_t mpo_offset, size_t bufferSize)
+{
+  // Reject offsets that lie outside the buffer entirely (SWSPLAT-30717 / CWE-125).
+  if (mpo_offset >= bufferSize)
+    throw std::runtime_error("mpo offset exceeds section buffer size");
+
+  const char* str = static_cast<const char*>(pHdr) + mpo_offset;
+  size_t remaining = bufferSize - mpo_offset;
+
+  // Verify a null terminator exists within the buffer before forming a C string.
+  if (strnlen(str, remaining) == remaining)
+    throw std::runtime_error("mpo string is not null-terminated within section buffer");
+
+  return str;
+}
+
 unsigned int
 XclBinUtilities::bytesToAlign(uint64_t _offset) {
   unsigned int bytesToAlign = (_offset & 0x7) ? 0x8 - (_offset & 0x7) : 0;
@@ -417,22 +430,30 @@ XclBinUtilities::getSignature(std::fstream& _istream, std::string& _sSignature,
 
   _istream.seekg(signatureOffset);
   _istream.read((char*)&signature, sizeof(XUtil::SignatureHeader));
+  if (_istream.gcount() != static_cast<std::streamsize>(sizeof(XUtil::SignatureHeader)))
+    throw std::runtime_error("ERROR: Short read of signature header");
 
-  // Get signedBy
+  // Get signedBy — compute seek position as uint64_t to avoid unsigned int overflow (CWE-190)
   if (signature.signedBySize != 0)
   {
-    _istream.seekg(signatureOffset + signature.signedByOffset);
+    _istream.seekg(static_cast<uint64_t>(signatureOffset) + signature.signedByOffset);
     std::unique_ptr<char[]> data( new char[ signature.signedBySize ] );
     _istream.read( data.get(), signature.signedBySize );
+    if (_istream.gcount() != static_cast<std::streamsize>(signature.signedBySize))
+      throw std::runtime_error("ERROR: Short read of signedBy field in signature");
+
     _sSignedBy = std::string(data.get(), signature.signedBySize);
   }
 
   // Get the signature
   if (signature.signatureSize != 0)
   {
-    _istream.seekg(signatureOffset + signature.signatureOffset);
+    _istream.seekg(static_cast<uint64_t>(signatureOffset) + signature.signatureOffset);
     std::unique_ptr<char[]> data( new char[ signature.signatureSize ] );
     _istream.read( data.get(), signature.signatureSize );
+    if (_istream.gcount() != static_cast<std::streamsize>(signature.signatureSize))
+      throw std::runtime_error("ERROR: Short read of signature field");
+
     _sSignature = std::string(data.get(), signature.signatureSize);
   }
 
@@ -456,7 +477,7 @@ XclBinUtilities::reportSignature(const std::string& _sInputFile)
   std::string sSignedBy;
   unsigned int totalSize;
   if (!XUtil::getSignature(inputStream, sSignature, sSignedBy, totalSize)) {
-    std::string errMsg = "ERROR: No signature found in file: " + _sInputFile;
+    std::string errMsg = "ERROR: No user defined signature added by --add-signature found in file: " + _sInputFile;
     throw std::runtime_error(errMsg);
   }
 
@@ -478,7 +499,7 @@ XclBinUtilities::removeSignature(const std::string& _sInputFile, const std::stri
   // Find the signature
   unsigned int signatureOffset;
   if (!XclBinUtilities::findBytesInStream(inputStream, getSignatureMagicValue(), signatureOffset)) {
-    std::string errMsg = "ERROR: No signature found in file: " + _sInputFile;
+    std::string errMsg = "ERROR: No user defined signature added by --add-signature found in file: " + _sInputFile;
     throw std::runtime_error(errMsg);
   }
 
@@ -764,7 +785,7 @@ createMemoryBankGroupEntries( std::vector<WorkingConnection> & workingConnection
       for (unsigned int idx = 0; idx < memIndexVector.size();)
       {
         auto s_index = idx;
-        while ((memIndexVector[idx] + 1) == memIndexVector[idx + 1])
+        while ((idx + 1 < memIndexVector.size()) && ((memIndexVector[idx] + 1) == memIndexVector[idx + 1]))
           idx++;
 
         newTag += std::to_string(memIndexVector[s_index]);
@@ -1230,6 +1251,22 @@ XclBinUtilities::exec(const fs::path &cmd,
 }
 
 #else
+// Shell-quote a single argument by wrapping in single quotes and escaping any
+// embedded single quotes as '"'"' (end-quote, literal-quote, re-open-quote).
+static std::string
+shell_quote(const std::string& s)
+{
+  std::string result = "'";
+  for (char c : s) {
+    if (c == '\'')
+      result += "'\"'\"'";
+    else
+      result += c;
+  }
+  result += "'";
+  return result;
+}
+
 int
 XclBinUtilities::exec(const fs::path &cmd,
                       const std::vector<std::string> &args,
@@ -1237,8 +1274,11 @@ XclBinUtilities::exec(const fs::path &cmd,
                       std::ostringstream & os_stdout,
                       std::ostringstream & os_stderr)
 {
-  // Build the command line
-  const std::string cmdLine = cmd.string() + " " + boost::algorithm::join(args, " ");
+  // Build the command line with each argument individually shell-quoted
+  // to prevent command injection via user-controlled paths (CWE-78).
+  std::string cmdLine = shell_quote(cmd.string());
+  for (const auto& arg : args)
+    cmdLine += " " + shell_quote(arg);
 
   std::array<char, 128> buffer;
   std::string result;

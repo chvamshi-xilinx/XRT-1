@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2019-2022 Xilinx, Inc
-// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef __XBUtilities_h_
 #define __XBUtilities_h_
@@ -11,13 +11,16 @@
 #include "core/common/query_requests.h"
 #include "core/common/archive.h"
 #include "core/common/runner/runner.h"
-#include "core/common/smi.h"
+#include "core/common/smi/smi.h"
+
+#include "SubCmd.h"
 
 #include <chrono>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <boost/algorithm/string.hpp>
@@ -25,6 +28,9 @@
 #include <boost/property_tree/ptree.hpp>
 
 namespace XBUtilities {
+
+  xrt_core::device::id_type
+  get_enumerated_device_count(bool inUserDomain);
 
   class Timer {
   private:
@@ -61,12 +67,25 @@ namespace XBUtilities {
   std::string get_device_class(const std::string& deviceBDF, bool in_user_domain);
 
   boost::property_tree::ptree
+  get_available_bdfs(bool inUserDomain);
+
+  boost::property_tree::ptree
   get_available_devices(bool inUserDomain);
 
   std::string
   str_available_devs(bool _inUserDomain);
 
-   /**
+  void
+  resolve_device(bool is_user_domain,
+                 const boost::program_options::variables_map& vm,
+                 std::string& device_bdf);
+
+  std::vector<std::shared_ptr<SubCmd>>
+  filter_subcmds(bool is_user_domain,
+                 const std::string& device_bdf,
+                 const std::vector<std::shared_ptr<SubCmd>>& all_subcmds);
+
+  /**
    * get_axlf_section() - Get section from the file passed in
    *
    * filename: file containing the axlf section
@@ -83,7 +102,7 @@ namespace XBUtilities {
    *
    * Return: list of UUIDs
    */
-  std::vector<std::string> get_uuids(const void *dtbuf);
+  std::vector<std::string> get_uuids(const void *dtbuf, size_t buf_size);
 
   xrt_core::query::reset_type str_to_reset_obj(const std::string& str);
 
@@ -156,7 +175,14 @@ namespace XBUtilities {
 
   bool
   is_strix_hardware(xrt_core::smi::smi_hardware_config::hardware_type hw_type);
-                                 /**
+
+  xrt_core::smi::smi_hardware_config::hardware_type
+  get_hardware_type(const xrt_core::device* dev);
+
+  void
+  printAdvancedDisclaimer();
+
+  /**
    * Open archive from device
    */
   std::unique_ptr<xrt_core::archive> 

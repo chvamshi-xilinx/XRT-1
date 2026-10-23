@@ -1,22 +1,8 @@
-/**
- * Copyright (C) 2018, 2020-2022 Xilinx, Inc. All rights reserved.
- * Copyright (C) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
-#ifndef __XclBinUtilities_h_
-#define __XclBinUtilities_h_
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2018-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
+#ifndef XclBinUtilities_h_
+#define XclBinUtilities_h_
 
 // Include files
 #include "xrt/detail/xclbin.h"
@@ -153,6 +139,29 @@ void TRACE_PrintTree(const std::string& _msg, const boost::property_tree::ptree&
 void TRACE_BUF(const std::string& _msg, const char* _pData, uint64_t _size);
 
 void safeStringCopy(char* _destBuffer, const std::string& _source, unsigned int _bufferSize);
+
+// bounded_mpo_cstr - Safely resolve an mpo (member-pointer-offset) field to a C string.
+// Validates that the offset lies within the buffer and that a null terminator exists
+// before the buffer end.  Throws std::runtime_error on violation (SWSPLAT-30717/CWE-125).
+const char* bounded_mpo_cstr(const void* pHdr, uint32_t mpo_offset, size_t bufferSize);
+
+// bounded_fixed_cstr - Safely convert a fixed-size embedded char/uint8_t array (CWE-125).
+// Wire-format structs embed fixed-size arrays that may not be null-terminated when an
+// attacker controls the xclbin. Returns a std::string of at most N chars, stopping at NUL.
+template <size_t N>
+std::string
+bounded_fixed_cstr(const char (&field)[N])
+{
+  return std::string(field, strnlen(field, N));
+}
+
+template <size_t N>
+std::string
+bounded_fixed_cstr(const unsigned char (&field)[N])
+{
+  return std::string(reinterpret_cast<const char*>(field), strnlen(reinterpret_cast<const char*>(field), N));
+}
+
 unsigned int bytesToAlign(uint64_t _offset);
 unsigned int alignBytes(std::ostream & _buf, unsigned int _byteBoundary);
 

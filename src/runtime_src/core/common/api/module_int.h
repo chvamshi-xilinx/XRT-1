@@ -28,7 +28,8 @@ namespace xrt_core::module_int {
 XRT_CORE_COMMON_EXPORT
 xrt::module
 create_module_run(const xrt::elf& elf, const xrt::hw_context& hwctx,
-                  uint32_t ctrl_code_id, const xrt::bo& ctrlpkt_bo);
+                  uint32_t ctrl_code_id, const xrt::bo& ctrlpkt_bo,
+                  std::string kernel_name = {});
 
 // Get the underlying elf handle from module object
 XRT_CORE_COMMON_EXPORT
@@ -82,18 +83,30 @@ XRT_CORE_COMMON_EXPORT
 void
 sync(const xrt::module&);
 
+// Check if dtrace is enabled
+XRT_CORE_COMMON_EXPORT
+bool
+is_dtrace_enabled(const xrt::module& module);
+
 // Dump dynamic trace buffer
 // Buffer is dumped after the kernel run is finished
-// Optional run_id parameter to generate unique filenames for multiple runs
+// Postfix is used to create unique filename for each run
 XRT_CORE_COMMON_EXPORT
 void
-dump_dtrace_buffer(const xrt::module& module, uint32_t run_id = 0);
+dump_dtrace_buffer(const xrt::module& module, const std::string& postfix);
 
 // Set dtrace control file for this run's module (run-level overrides config).
 // Reinitializes dtrace with the given path; empty path means use config.
 // No-op for module types that do not support dtrace.
+XRT_CORE_COMMON_EXPORT
 void
 set_dtrace_control_file(const xrt::module& module, const std::string& path);
+
+// Turn dtrace off for this run's module. Distinct from passing an empty path
+// to set_dtrace_control_file, which falls back to the config file path.
+XRT_CORE_COMMON_EXPORT
+void
+clear_dtrace(const xrt::module& module);
 
 // Returns buffer object associated with control scratchpad memory.
 // This memory is created using ELF associated with run object.
@@ -101,6 +114,13 @@ set_dtrace_control_file(const xrt::module& module, const std::string& path);
 XRT_CORE_COMMON_EXPORT
 xrt::bo
 get_ctrl_scratchpad_bo(const xrt::module& module);
+
+// Get the name of the module
+// This is optional and only available for modules created with name
+// Returns empty string if the module is default-constructed or not created with name
+XRT_CORE_COMMON_EXPORT
+std::string
+get_name(const xrt::module& module);
 
 } // xrt_core::module_int
 

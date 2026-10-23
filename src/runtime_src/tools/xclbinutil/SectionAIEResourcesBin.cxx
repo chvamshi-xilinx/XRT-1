@@ -1,26 +1,10 @@
-
-/**
- * Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "SectionAIEResourcesBin.h"
 
 #include "XclBinUtilities.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
 namespace XUtil = XclBinUtilities;
@@ -35,7 +19,7 @@ SectionAIEResourcesBin::init SectionAIEResourcesBin::initializer;
 
 SectionAIEResourcesBin::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(AIE_RESOURCES_BIN, "AIE_RESOURCES_BIN", boost::factory<SectionAIEResourcesBin*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(AIE_RESOURCES_BIN, "AIE_RESOURCES_BIN", []{ return new SectionAIEResourcesBin(); });
   sectionInfo->supportsSubSections = true;
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::obj));
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::metadata));
@@ -83,7 +67,7 @@ SectionAIEResourcesBin::getSubSectionEnum(const std::string& sSubSectionName)
 const std::string&
 SectionAIEResourcesBin::getSubSectionName(SectionAIEResourcesBin::SubSection eSubSection)
 {
-  auto subSectionTable = getSubSectionTable();
+  const auto& subSectionTable = getSubSectionTable();
   auto iter = std::find_if(subSectionTable.begin(), subSectionTable.end(), [&](const auto& entry) {return entry.second == eSubSection;});
 
   if (iter == subSectionTable.end())
@@ -173,11 +157,11 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
                              "  mpo_version (0x%lx): '%s'\n"
                              "  m_start_column (0x%lx): '%s'\n"
                              "  m_num_columns (0x%lx): '%s'")
-               % pHdr->mpo_name % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_name)
+               % pHdr->mpo_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name,       _origSectionSize)
                % pHdr->m_image_offset % pHdr->m_image_size
-               % pHdr->mpo_version % (reinterpret_cast<const char*>(pHdr) + pHdr->mpo_version)
-               % pHdr->m_start_column % (reinterpret_cast<const char*>(pHdr) + pHdr->m_start_column)
-               % pHdr->m_num_columns % (reinterpret_cast<const char*>(pHdr) + pHdr->m_num_columns));
+               % pHdr->mpo_version % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version,    _origSectionSize)
+               % pHdr->m_start_column % XUtil::bounded_mpo_cstr(pHdr, pHdr->m_start_column, _origSectionSize)
+               % pHdr->m_num_columns % XUtil::bounded_mpo_cstr(pHdr, pHdr->m_num_columns,  _origSectionSize));
 
   // Get the JSON metadata
   _istream.seekg(0, _istream.end);             // Go to the beginning
@@ -215,7 +199,7 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_name
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(aie_resources_bin) + pHdr->mpo_name;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, _origSectionSize);
     auto sValue = ptSK.get<std::string>("name", sDefault);
 
     if (sValue.compare(getSectionIndexName()) != 0) {
@@ -230,7 +214,7 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // mpo_version
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(aie_resources_bin) + pHdr->mpo_version;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, _origSectionSize);
     auto sValue = ptSK.get<std::string>("version", sDefault);
     aieResourcesBinHdr.mpo_version = sizeof(aie_resources_bin) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -239,7 +223,7 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // m_start_column
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(aie_resources_bin) + pHdr->m_start_column;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->m_start_column, _origSectionSize);
     auto sValue = ptSK.get<std::string>("start_column", sDefault);
     aieResourcesBinHdr.m_start_column = sizeof(aie_resources_bin) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -248,7 +232,7 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
 
   // m_num_columns
   {
-    auto sDefault = reinterpret_cast<const char*>(pHdr) + sizeof(aie_resources_bin) + pHdr->m_num_columns;
+    auto sDefault = XUtil::bounded_mpo_cstr(pHdr, pHdr->m_num_columns, _origSectionSize);
     auto sValue = ptSK.get<std::string>("num_columns", sDefault);
     aieResourcesBinHdr.m_num_columns = sizeof(aie_resources_bin) + stringBlock.tellp();
     stringBlock << sValue << '\0';
@@ -272,7 +256,12 @@ SectionAIEResourcesBin::copyBufferUpdateMetadata(const char* _pOrigDataSection,
   std::string sStringBlock = stringBlock.str();
   _buffer.write(sStringBlock.c_str(), sStringBlock.size());
 
-  // Image
+  // Image — validate offset+size against the original section before reading
+  {
+    uint64_t img_end = static_cast<uint64_t>(pHdr->m_image_offset) + pHdr->m_image_size;
+    if (img_end > _origSectionSize)
+      throw std::runtime_error("aie_resources_bin m_image_offset/m_image_size out of bounds");
+  }
   _buffer.write(reinterpret_cast<const char*>(pHdr) + pHdr->m_image_offset, pHdr->m_image_size);
 }
 
@@ -398,6 +387,12 @@ SectionAIEResourcesBin::writeObjImage(std::ostream& _oStream) const
   // No look at the data
   auto pHdr = reinterpret_cast<aie_resources_bin*>(m_pBuffer);
 
+  {
+    uint64_t img_end = static_cast<uint64_t>(pHdr->m_image_offset) + pHdr->m_image_size;
+    if (img_end > m_bufferSize)
+      throw std::runtime_error("aie_resources_bin m_image_offset/m_image_size out of bounds");
+  }
+
   auto pFWBuffer = reinterpret_cast<const char*>(pHdr) + pHdr->m_image_offset;
   _oStream.write(pFWBuffer, pHdr->m_image_size);
 }
@@ -424,19 +419,19 @@ SectionAIEResourcesBin::writeMetadata(std::ostream& _oStream) const
                              "  mpo_version (0x%lx): '%s'\n"
                              "  m_start_column (0x%lx): '%s'\n"
                              "  m_num_columns (0x%lx): '%s'")
-               % pHdr->mpo_name % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_name)
+               % pHdr->mpo_name % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, m_bufferSize)
                % pHdr->m_image_offset % pHdr->m_image_size
-               % pHdr->mpo_version % (reinterpret_cast<char*>(pHdr) + pHdr->mpo_version)
-               % pHdr->m_start_column % (reinterpret_cast<char*>(pHdr) + pHdr->m_start_column)
-               % pHdr->m_num_columns % (reinterpret_cast<char*>(pHdr) + pHdr->m_num_columns));
+               % pHdr->mpo_version % XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, m_bufferSize)
+               % pHdr->m_start_column % XUtil::bounded_mpo_cstr(pHdr, pHdr->m_start_column, m_bufferSize)
+               % pHdr->m_num_columns % XUtil::bounded_mpo_cstr(pHdr, pHdr->m_num_columns, m_bufferSize));
 
   // Convert the data from the binary format to JSON
   boost::property_tree::ptree ptAieResourcesBin;
 
-  ptAieResourcesBin.put("name", reinterpret_cast<char*>(pHdr) + pHdr->mpo_name);
-  ptAieResourcesBin.put("version", reinterpret_cast<char*>(pHdr) + pHdr->mpo_version);
-  ptAieResourcesBin.put("start_column", reinterpret_cast<char*>(pHdr) + pHdr->m_start_column);
-  ptAieResourcesBin.put("num_columns", reinterpret_cast<char*>(pHdr) + pHdr->m_num_columns);
+  ptAieResourcesBin.put("name",         XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_name, m_bufferSize));
+  ptAieResourcesBin.put("version",      XUtil::bounded_mpo_cstr(pHdr, pHdr->mpo_version, m_bufferSize));
+  ptAieResourcesBin.put("start_column", XUtil::bounded_mpo_cstr(pHdr, pHdr->m_start_column, m_bufferSize));
+  ptAieResourcesBin.put("num_columns",  XUtil::bounded_mpo_cstr(pHdr, pHdr->m_num_columns, m_bufferSize));
 
   boost::property_tree::ptree root;
   root.put_child("aie_resources_bin_metadata", ptAieResourcesBin);

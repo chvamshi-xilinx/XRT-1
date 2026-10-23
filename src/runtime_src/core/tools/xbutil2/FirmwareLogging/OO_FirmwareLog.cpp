@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
@@ -81,7 +81,7 @@ OO_FirmwareLog::execute(const SubCmdOptions& _options) const
     //validate required arguments
     validate_args(); 
   } catch(xrt_core::error& err) {
-    std::cout << err.what() << std::endl;
+    XBUtilities::print_exception(err);
     printHelp();
     throw xrt_core::error(err.get_code());
   }

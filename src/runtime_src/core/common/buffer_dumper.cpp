@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 #define XRT_CORE_COMMON_SOURCE // in same dll as core_common
 #define XCL_DRIVER_DLL_EXPORT  // in same dll as xrt_bo.h
 #define XRT_API_SOURCE         // in same dll as api
@@ -10,9 +10,11 @@
 #include "core/common/uc_log_schema.h"
 
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <sstream>
 #include <array>
+#include <utility>
 
 namespace xrt_core {
 
@@ -21,11 +23,16 @@ buffer_dumper(config cfg)
   : m_config(std::move(cfg))
   , m_data_size(m_config.chunk_size - m_config.metadata_size)
   , m_dumped_counts(m_config.num_chunks, 0)
-  , m_file_streams(m_config.num_chunks)
+  , m_file_streams(needs_file_streams() ? m_config.num_chunks : 0)
 {
   // Files are opened lazily in get_or_open_stream() when first data is available
-  // start the background thread to dump the data
-  m_dump_thread = std::thread(&buffer_dumper::dumping_loop, this);
+  // start background dumping only when enabled
+  if (m_config.enable_dumper_thread) {
+    m_done_future = m_done_promise.get_future();
+    // start the background dump loop
+    m_dump_thread = std::thread(&buffer_dumper::dumping_loop, this);
+    m_thread_created = true;
+  }
 }
 
 std::ofstream&
@@ -41,7 +48,7 @@ get_or_open_stream(size_t chunk_index)
 
   std::string filename = m_config.dump_file_prefix + "_" + m_session_timestamp + "_" +
                          std::to_string(xrt_core::utils::get_pid()) + "_" +
-                         std::to_string(chunk_index) + ".txt";
+                         std::to_string(chunk_index) + (m_config.dump_bin_format ? ".bin" : ".txt");
 
   fs.open(filename, std::ios::out | std::ios::binary);
   if (!fs.is_open())
@@ -56,9 +63,17 @@ buffer_dumper::
   // Flush the remaining data
   // catch exceptions to avoid throwing in destructor
   try {
-    m_stop_thread = true;
-    m_cv.notify_one();
-    m_dump_thread.join();
+    // clean up thread state only if the thread was created
+    if (m_thread_created) {
+      // signal the dump thread to stop
+      m_stop_thread = true;
+      m_cv.notify_one();
+      // Wait for dump thread to finish before detaching.
+      m_done_future.wait();
+      // Detach instead of join to avoid deadlock under DLL_PROCESS_DETACH
+      m_dump_thread.detach();
+    }
+
     flush();
   }
   catch (const std::exception& e) {
@@ -78,96 +93,187 @@ read_logged_count(uint8_t* chunk)
 
 void
 buffer_dumper::
-dump_chunk_data(size_t chunk_index, size_t start, size_t length, uint8_t* chunk)
+dump_chunk_data_binary(size_t chunk_index, size_t start_offset, size_t bytes_to_end,
+                       size_t length, uint8_t* chunk)
 {
   std::ofstream& fs = get_or_open_stream(chunk_index);
-
-  // Check if stream is in good state before writing
-  if (!fs.good()) {
+  if (!fs.good())
     throw std::runtime_error("File stream for chunk " + std::to_string(chunk_index) +
                              " is in bad state before write");
-  }
 
-  // UC log parsing and writing log messages to file using log schema
-  try {
-    // Parse log entries from the chunk using log schema
-    const size_t start_offset = (start % m_data_size) + m_config.metadata_size;
-    const size_t bytes_to_end = m_config.chunk_size - start_offset;
+  // Rewrite metadata at the start on every call: the count field in the metadata
+  // is updated by the device each time new data is written, so we must keep it
+  // in sync with the appended payload.
+  fs.seekp(0);
+  fs.write(reinterpret_cast<const char*>(chunk),
+           static_cast<std::streamsize>(m_config.metadata_size));
+  if (!fs)
+    throw std::runtime_error("Failed to write metadata for chunk " + std::to_string(chunk_index));
 
-    std::ostringstream parsed_stream;
-    size_t parsed_bytes = 0;
-    // Iterate and parse each log entry in dumped data
-    while (parsed_bytes < length) {
-      size_t entry_offset = 0;
+  // Append payload after existing file content
+  fs.seekp(0, std::ios::end);
 
-      // Handle circular buffer wrapping
-      if (parsed_bytes < bytes_to_end)
-        entry_offset = start_offset + parsed_bytes; // No wrap around
-      else
-        entry_offset = m_config.metadata_size + (parsed_bytes - bytes_to_end); // Wrapped around
-
-      // Current log entry in chunk
-      const uint8_t* entry = chunk + entry_offset;
-      // Extract log entry fields
-      log_entry log;
-      std::memcpy(&log, entry, sizeof(log_entry));
-
-      // Format log message using log schema
-      // If log_id is not found in log schema, use default format string
-      constexpr std::array<const char*, 3> default_formats = {
-        "unknown !",
-        "unknown %d !!",
-        "unknown %d unknown %d !!!"
-      };
-      auto log_schema_it = uc_log_schema.logs.find(log.log_id);
-      const char* log_format = (log_schema_it != uc_log_schema.logs.end())
-        ? log_schema_it->second.c_str()
-        : default_formats[std::min(static_cast<std::size_t>(log.length - (offsetof(log_entry, argument1) / sizeof(uint32_t))),
-                          (default_formats.size() - 1))];
-
-      parsed_stream << "[CERT] ";
-      std::array<char, 1024> log_message{}; // NOLINT(cppcoreguidelines-avoid-magic-numbers)
-      if (log.length == (offsetof(log_entry, argument1) / sizeof(uint32_t)))
-      { // Log message without arguments
-        parsed_stream << log_format;
-      }
-      else if (log.length == (offsetof(log_entry, argument2) / sizeof(uint32_t)))
-      { // Log message with one argument
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
-        static_cast<void>(std::snprintf(log_message.data(), log_message.size(), log_format, log.argument1));
-        parsed_stream << log_message.data();
-      }
-      else if (log.length == (sizeof(log_entry) / sizeof(uint32_t)))
-      { // Log message with two arguments
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
-        static_cast<void>(std::snprintf(log_message.data(), log_message.size(), log_format, log.argument1, log.argument2));
-        parsed_stream << log_message.data();
-      }
-      else
-      { // Unexpected entry length
-        xrt_core::message::send(xrt_core::message::severity_level::warning, "buffer_dumper",
-                                "Invalid UC log entry length: " + std::to_string(log.length));
-      }
-
-      parsed_bytes += m_config.metadata_size;
-    }
-
-    // Append parsed output to file
-    fs.seekp(0, std::ios::end);
-    fs << parsed_stream.str();
-
+  if (length <= bytes_to_end) {
+    // Payload fits before the circular buffer wrap point; write in one shot
+    fs.write(reinterpret_cast<const char*>(chunk + start_offset),
+             static_cast<std::streamsize>(length));
     if (!fs)
-      throw std::runtime_error("Failed to write parsed UC log for chunk " + std::to_string(chunk_index));
+      throw std::runtime_error("Failed to write " + std::to_string(length) +
+                               " bytes to chunk " + std::to_string(chunk_index));
   }
-  catch (const std::exception& e) {
-    // Log parsing error, log warning and continue
-    xrt_core::message::send(xrt_core::message::severity_level::warning, "buffer_dumper",
-                            std::string{"UC log parsing failed: "} + e.what());
+  else {
+    // Payload straddles the wrap point; write the two contiguous segments separately
+    fs.write(reinterpret_cast<const char*>(chunk + start_offset),
+             static_cast<std::streamsize>(bytes_to_end));
+    if (!fs)
+      throw std::runtime_error("Failed to write first part (" + std::to_string(bytes_to_end) +
+                               " bytes) to chunk " + std::to_string(chunk_index));
+
+    fs.write(reinterpret_cast<const char*>(chunk + m_config.metadata_size),
+             static_cast<std::streamsize>(length - bytes_to_end));
+    if (!fs)
+      throw std::runtime_error("Failed to write wrapped part (" +
+                               std::to_string(length - bytes_to_end) +
+                               " bytes) to chunk " + std::to_string(chunk_index));
   }
 
   fs.flush();
   if (!fs)
     throw std::runtime_error("Failed to flush chunk " + std::to_string(chunk_index));
+}
+
+std::string
+buffer_dumper::
+parse_log_entries(size_t start_offset, size_t bytes_to_end, size_t length,
+                  uint8_t* chunk)
+{
+  std::ostringstream out;
+  size_t parsed_bytes = 0;
+
+  while (parsed_bytes < length) {
+    // Resolve the byte offset of the current entry, accounting for circular buffer wrap
+    size_t entry_offset = (parsed_bytes < bytes_to_end)
+      ? start_offset + parsed_bytes
+      : m_config.metadata_size + (parsed_bytes - bytes_to_end);
+
+    log_entry log;
+    std::memcpy(&log, chunk + entry_offset, sizeof(log_entry));
+
+    // Look up format string in the schema; fall back to a generic placeholder
+    // when the log_id is unrecognized. The fallback is chosen by argument count
+    // (derived from entry length) so the output still shows available data.
+    constexpr std::array<const char*, 3> default_formats = {
+      "unknown !\n",
+      "unknown %d !!\n",
+      "unknown %d unknown %d !!!\n"
+    };
+
+    auto log_schema_it = uc_log_schema.logs.find(log.log_id);
+    const char* log_format = (log_schema_it != uc_log_schema.logs.end())
+      ? log_schema_it->second.c_str()
+      : default_formats[std::min(
+          static_cast<std::size_t>(
+              log.length - (offsetof(log_entry, argument1) / sizeof(uint32_t))),
+          default_formats.size() - 1)];
+
+    // Reconstruct 64-bit nanosecond timestamp from the two 32-bit halves
+    constexpr uint64_t ts_high_shift = 32;
+    uint64_t timestamp_ns =
+        (static_cast<uint64_t>(log.ts_high) << ts_high_shift) | log.ts_low;
+    out << "[" << xrt_core::get_timestamp_for_uc_log(timestamp_ns) << "] [CERT] ";
+
+    // Format the log message according to the number of arguments encoded in entry length
+    std::array<char, 1024> log_message{}; // NOLINT(cppcoreguidelines-avoid-magic-numbers)
+    if (log.length == (offsetof(log_entry, argument1) / sizeof(uint32_t))) {
+      out << log_format;
+    }
+    else {
+      // Always pass both arguments regardless of log.length so that the
+      // device cannot independently control the snprintf argument count
+      // relative to the format string's specifier count, which would
+      // cause snprintf to read uninitialized register/stack values.
+      // Passing surplus arguments to snprintf is harmless.
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+      static_cast<void>(std::snprintf(log_message.data(), log_message.size(),
+                                      log_format, log.argument1, log.argument2));
+      out << log_message.data();
+    }
+
+    parsed_bytes += m_config.metadata_size;
+  }
+
+  // Separator marks the read boundary; entries may have been lost before the next read
+  out << "[0.000000000] [CERT] [Dumper]--------------[Separator]--------------\n";
+  return out.str();
+}
+
+void
+buffer_dumper::
+dispatch_parsed_log(size_t chunk_index, const std::string& text)
+{
+  const std::string& sink = m_config.uc_log_dump;
+
+  // "null" sink: silently discard
+  if (sink == "null")
+    return;
+
+  if (sink == "file" || sink.empty()) {
+    // Append the entire text block to the per-chunk file
+    std::ofstream& fs = get_or_open_stream(chunk_index);
+    if (!fs.good())
+      throw std::runtime_error("File stream for chunk " + std::to_string(chunk_index) +
+                               " is in bad state before write");
+    fs.seekp(0, std::ios::end);
+    fs << text;
+    if (!fs)
+      throw std::runtime_error("Failed to write parsed UC log for chunk " +
+                               std::to_string(chunk_index));
+
+    fs.flush();
+    if (!fs)
+      throw std::runtime_error("Failed to flush chunk " + std::to_string(chunk_index));
+
+    return;
+  }
+
+  // syslog or console: each line is dispatched as a discrete message so the
+  // sink can apply its own formatting and routing per entry
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (!line.empty())
+      // Sink argument sent is cached and dispatcher is created inf first call.
+      // TODO: Pass decoded severity from uC log entry.
+      // For now all entries are sent with info severity.
+      // Also may be pass uC index in tag for better traceability.
+      xrt_core::message::send_uc_log(sink,
+                                     xrt_core::message::severity_level::info,
+                                     "xrt_uc_log", line.c_str());
+  }
+}
+
+void
+buffer_dumper::
+dump_chunk_data(size_t chunk_index, size_t start, size_t length, uint8_t* chunk)
+{
+  const size_t start_offset = (start % m_data_size) + m_config.metadata_size;
+  const size_t bytes_to_end = m_config.chunk_size - start_offset;
+
+  if (m_config.dump_bin_format) {
+    dump_chunk_data_binary(chunk_index, start_offset, bytes_to_end, length, chunk);
+    return;
+  }
+
+  // Dump in parsed text format
+  // Parse log entries and route to the configured sink.
+  try {
+    const std::string text = parse_log_entries(start_offset, bytes_to_end, length, chunk);
+    dispatch_parsed_log(chunk_index, text);
+  }
+  catch (const std::exception& e) {
+    xrt_core::message::send(xrt_core::message::severity_level::warning, "buffer_dumper",
+                            std::string{"UC log parsing failed: "} + e.what());
+  }
 }
 
 void
@@ -190,9 +296,14 @@ process_chunks_no_lock()
     size_t logged_wrap = logged_count / m_data_size;
     size_t dumped_wrap = dumped_count / m_data_size;
 
-    if (logged_count > dumped_count && logged_wrap > dumped_wrap)
-      throw std::runtime_error("Overwrite detected in chunk: " + std::to_string(i) +
-                               ", dump buffer corrupted.");
+    // Overflow detected: reposition to dump the most recent full buffer's worth of data.
+    if (logged_count > dumped_count && logged_wrap > dumped_wrap) {
+      xrt_core::message::send(xrt_core::message::severity_level::warning, "buffer_dumper",
+                              "UC log overrun on chunk " + std::to_string(i) + ": " +
+                              std::to_string(logged_count - dumped_count - m_data_size) +
+                              " bytes lost, recovering from oldest surviving position.");
+      dumped_count = logged_count - m_data_size;
+    }
 
     if (dumped_count != logged_count) {
       size_t to_dump = logged_count - dumped_count;
@@ -243,6 +354,8 @@ dumping_loop()
                               std::string{"Error in dumping loop: "} + e.what());
     }
   }
+
+  m_done_promise.set_value();
 }
 
 void
@@ -251,6 +364,114 @@ flush()
 {
   // process chunks to dump the remaining data
   process_chunks();
+}
+
+dtrace_buffer_dumper::
+dtrace_buffer_dumper(config cfg)
+  : m_config(std::move(cfg))
+  , m_results(nlohmann::ordered_json::object())
+{}
+
+dtrace_buffer_dumper::
+~dtrace_buffer_dumper()
+{
+  // Flush coalesced results before destruction
+  try {
+    flush();
+  }
+  catch (const std::exception& e) {
+    xrt_core::message::send(xrt_core::message::severity_level::warning, "dtrace_buffer_dumper",
+                            std::string{"Error during cleanup: "} + e.what());
+  }
+}
+
+void
+dtrace_buffer_dumper::
+write_to_file()
+{
+  // Write coalesced JSON to a timestamped file in the current working directory
+  const std::string result_file_path = std::filesystem::current_path().string()
+                                     + "/dtrace_dump"
+                                     + "_ctx_" + std::to_string(m_config.slot_idx)
+                                     + "_" + xrt_core::get_timestamp_for_filename()
+                                     + ".json";
+
+  std::ofstream json_file(result_file_path);
+  if (!json_file)
+    throw std::runtime_error("[dtrace] : failed to open file for dumping dtrace buffer result");
+
+  json_file << m_results.dump(4) << "\n";
+  if (!json_file)
+    throw std::runtime_error("[dtrace] : failed to write dtrace buffer result to file");
+
+  json_file.flush();
+  if (!json_file)
+    throw std::runtime_error("[dtrace] : failed to flush dtrace buffer result file");
+
+  xrt_core::message::send(xrt_core::message::severity_level::debug, "dtrace_buffer_dumper",
+                          std::string{"[dtrace] : dtrace buffer dumped successfully to - "}
+                          + result_file_path);
+
+  // Clear after the write completes without error
+  m_results = nlohmann::ordered_json::object();
+  m_accumulated_bytes = 0;
+}
+
+void
+dtrace_buffer_dumper::
+append(const std::string& key, const std::string& result_json)
+{
+  try {
+    auto entry = nlohmann::ordered_json::parse(result_json);
+    // No probes fired
+    if (entry.empty())
+      return;
+
+    // Spill to disk when the next append would exceed the in-memory cap, then
+    // continue buffering into a fresh in-memory batch.
+    const auto entry_size = result_json.size();
+    if (m_accumulated_bytes + entry_size > m_config.max_bytes) {
+      const auto max_mb = m_config.max_bytes / (1024 * 1024); // NOLINT
+      xrt_core::message::send(xrt_core::message::severity_level::warning, "dtrace_buffer_dumper",
+                              std::string{"[dtrace] : coalesce result buffer limit ("} + std::to_string(max_mb) + " MB) reached, spilled to disk.");
+
+      if (!m_results.empty())
+        write_to_file();
+
+      // If single run entry exceeds the cap, spill it immediately.
+      if (entry_size > m_config.max_bytes) {
+        m_results[key] = std::move(entry);
+        write_to_file();
+        return;
+      }
+    }
+
+    m_results[key] = std::move(entry);
+    m_accumulated_bytes += entry_size;
+    xrt_core::message::send(xrt_core::message::severity_level::debug, "dtrace_buffer_dumper",
+                            std::string{"[dtrace] : dtrace buffered successfully for key - "} + key);
+  }
+  catch (const std::exception& e) {
+    xrt_core::message::send(xrt_core::message::severity_level::warning, "dtrace_buffer_dumper",
+                            std::string{"[dtrace] : failed to append coalesced result: "} + e.what());
+  }
+}
+
+void
+dtrace_buffer_dumper::
+flush()
+{
+  // Skip if nothing remains to write
+  if (m_results.empty())
+    return;
+
+  try {
+    write_to_file();
+  }
+  catch (const std::exception& e) {
+    xrt_core::message::send(xrt_core::message::severity_level::debug, "dtrace_buffer_dumper",
+                            std::string{"[dtrace] : dtrace buffer dump failed, "} + e.what());
+  }
 }
 
 } // xrt_core

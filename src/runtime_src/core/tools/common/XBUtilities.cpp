@@ -2,37 +2,37 @@
 // Copyright (C) 2019-2022 Xilinx, Inc
 // Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 
-// ------ I N C L U D E   F I L E S -------------------------------------------
 #include "XBUtilities.h"
 #include "XBUtilitiesCore.h"
 
-// Local - Include Files
 #include "common/error.h"
+#include "common/info_platform.h"
 #include "common/info_vmr.h"
 #include "common/utils.h"
 #include "common/message.h"
 #include "common/system.h"
 #include "common/sysinfo.h"
-#include "common/smi.h"
+#include "common/utils.h"
+#include "common/smi/smi.h"
 #include "common/module_loader.h"
 #include "xrt/detail/version-slim.h"
 
-// 3rd Party Library - Include Files
 #include <boost/algorithm/string/split.hpp>
 #include <boost/format.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/tokenizer.hpp>
 
-// System - Include Files
+#include <algorithm>
+#include <filesystem>
+#include <limits>
 #include <iostream>
 #include <map>
 #include <regex>
-#include <filesystem>
+#include <set>
+#include <stdexcept>
 
 
 #ifdef _WIN32
-
-# pragma warning( disable : 4189 4100 4996)
 # pragma comment(lib, "Ws2_32.lib")
 /* need to link the lib for the following to work */
 # define be32toh ntohl
@@ -65,6 +65,50 @@ struct fdt_header {
 
 namespace xq = xrt_core::query;
 
+namespace {
+
+// User-domain paths enumerate user devices first, then mgmt devices.
+// Mgmt-domain paths (xbmgmt) use mgmt devices only.
+std::pair<bool, xrt_core::device::id_type>
+map_device_index(xrt_core::device::id_type index, bool in_user_domain)
+{
+  if (!in_user_domain)
+    return {false, index};
+
+  const auto user_total = xrt_core::get_total_devices(true).first;
+  if (index < user_total)
+    return {true, index};
+  return {false, index - user_total};
+}
+
+} // namespace
+
+xrt_core::device::id_type
+XBUtilities::get_enumerated_device_count(bool inUserDomain)
+{
+  if (!inUserDomain)
+    return xrt_core::get_total_devices(false).first;
+
+  const auto user_total = xrt_core::get_total_devices(true).first;
+  const auto mgmt_total = xrt_core::get_total_devices(false).first;
+
+  // xrt-smi user domain: include mgmt PF only on Ryzen (NPU) platforms.
+  if (mgmt_total) {
+    try {
+      const auto device = xrt_core::get_mgmtpf_device(0);
+      const auto device_class = xrt_core::device_query_default<xq::device_class>(
+        device, xq::device_class::type::alveo);
+      if (device_class == xq::device_class::type::ryzen)
+        return user_total + mgmt_total;
+    }
+    catch (const std::exception&) {
+      // mgmt present but not accessible; omit from xrt-smi user enumeration
+    }
+  }
+
+  return user_total;
+}
+
 // ------ F U N C T I O N S ---------------------------------------------------
 
 std::string
@@ -84,6 +128,44 @@ XBUtilities::Timer::format_time(std::chrono::duration<double> duration)
   formatted_time += std::to_string(seconds.count() % 60) + "s";
 
   return formatted_time;
+}
+
+
+boost::property_tree::ptree
+XBUtilities::get_available_bdfs(bool inUserDomain)
+{
+  // Minimal listing for BDF selection and str_available_devs.
+  xrt_core::device_collection deviceCollection;
+  collect_devices(std::set<std::string> {"_all_"}, inUserDomain, deviceCollection);
+  boost::property_tree::ptree pt;
+  for (const auto & device : deviceCollection) {
+    boost::property_tree::ptree pt_dev;
+    pt_dev.put("bdf", xrt_core::query::pcie_bdf::to_string(xrt_core::device_query<xrt_core::query::pcie_bdf>(device)));
+
+    const auto device_class = xrt_core::device_query_default<xrt_core::query::device_class>(device, xrt_core::query::device_class::type::alveo);
+    pt_dev.put("device_class", xrt_core::query::device_class::enum_to_str(device_class));
+
+    const auto is_mfg = xrt_core::device_query_default<xrt_core::query::is_mfg>(device, false);
+
+    if (is_mfg) {
+      auto mGoldenVer = xrt_core::device_query<xrt_core::query::mfg_ver>(device);
+      std::string vbnv = "xilinx_" + xrt_core::device_query<xrt_core::query::board_name>(device) + "_GOLDEN_"+ std::to_string(mGoldenVer);
+      pt_dev.put("vbnv", vbnv);
+    }
+    else {
+      switch (device_class) {
+      case xrt_core::query::device_class::type::alveo:
+        pt_dev.put("vbnv", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
+        break;
+      case xrt_core::query::device_class::type::ryzen:
+        pt_dev.put("name", xrt_core::platform::get_device_name(device.get()));
+        break;
+      }
+    }
+
+    pt.push_back(std::make_pair("", pt_dev));
+  }
+  return pt;
 }
 
 boost::property_tree::ptree
@@ -116,24 +198,30 @@ XBUtilities::get_available_devices(bool inUserDomain)
         pt_dev.put("vbnv", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
         break;
       case xrt_core::query::device_class::type::ryzen:
-        pt_dev.put("name", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
+        pt_dev.put("name", xrt_core::platform::get_device_name(device.get()));
         break;
       }
-      
-      try { //1RP
-        pt_dev.put("id", xrt_core::query::rom_time_since_epoch::to_string(xrt_core::device_query<xrt_core::query::rom_time_since_epoch>(device)));
-      }
-      catch(...) {
-        // The id wasn't added
-      }
 
-      try { //2RP
-        auto logic_uuids = xrt_core::device_query<xrt_core::query::logic_uuids>(device);
-        if (!logic_uuids.empty())
-          pt_dev.put("id", xrt_core::query::interface_uuids::to_uuid_upper_string(logic_uuids[0]));
+      if (device_class == xrt_core::query::device_class::type::ryzen) {
+        try { // Ryzen/NPU: derive UUID from PCIe BDF
+          pt_dev.put("id", xrt_core::query::pcie_bdf::to_uuid(
+            xrt_core::device_query<xrt_core::query::pcie_bdf>(device)).to_string());
+        }
+        catch(...) {}
       }
-      catch(...) {
-        // The id wasn't added
+      else {
+        try { //1RP
+          pt_dev.put("id", xrt_core::query::rom_time_since_epoch::to_string(
+            xrt_core::device_query<xrt_core::query::rom_time_since_epoch>(device)));
+        }
+        catch(...) {}
+
+        try { //2RP - overwrites 1RP if available
+          auto logic_uuids = xrt_core::device_query<xrt_core::query::logic_uuids>(device);
+          if (!logic_uuids.empty())
+            pt_dev.put("id", xrt_core::query::interface_uuids::to_uuid_upper_string(logic_uuids[0]));
+        }
+        catch(...) {}
       }
 
       try {
@@ -150,31 +238,16 @@ XBUtilities::get_available_devices(bool inUserDomain)
       }
       try {
         const auto cert_fw_ver = xrt_core::device_query<xq::cert_firmware_version>(device);
-        pt_dev.put("cert_firmware_date", cert_fw_ver.date);
-        pt_dev.put("cert_firmware_hash", cert_fw_ver.git_hash);
+        std::string version = "N/A";
+        if (cert_fw_ver.major != 0 || cert_fw_ver.minor != 0 || cert_fw_ver.hotfix != 0 || cert_fw_ver.build != 0) {
+          version = boost::str(boost::format("%u.%u.%u.%u")
+            % cert_fw_ver.major % cert_fw_ver.minor % cert_fw_ver.hotfix % cert_fw_ver.build);
+        }
+        pt_dev.put("cert_firmware_version", version);
       }
       catch(...) {
         // The CERT firmware wasn't added
       }
-      try {
-        const auto uc_fw_ver = xrt_core::device_query<xq::firmware_version>(device, xq::firmware_version::firmware_type::uc_firmware);
-        std::string version = "N/A";
-        std::string build_date = "N/A";
-
-        if (uc_fw_ver.major != 0 || uc_fw_ver.minor != 0) {
-          version = boost::str(boost::format("%u.%u, %s")
-            % uc_fw_ver.major
-            % uc_fw_ver.minor
-            % uc_fw_ver.git_hash);
-          build_date = uc_fw_ver.date;
-        }
-        pt_dev.put("uc_firmware.version", version);
-        pt_dev.put("uc_firmware.build_date", build_date);
-      }
-      catch (...) {
-        // The UC firmware wasn't added
-      }
-
       try {
         const auto aie_tiles = xrt_core::device_query<xq::aie_tiles_stats>(device);
         std::string topology = boost::str(boost::format("%ux%u") % aie_tiles.rows % aie_tiles.cols);
@@ -185,35 +258,9 @@ XBUtilities::get_available_devices(bool inUserDomain)
       }
 
       try {
-        // Map hardware type to AIE architecture version string
-        const auto& pcie_id = xrt_core::device_query<xrt_core::query::pcie_id>(device);
-        xrt_core::smi::smi_hardware_config smi_hrdw;
-        auto hardware_type = smi_hrdw.get_hardware_type(pcie_id);
-
-        switch (hardware_type) {
-        case xrt_core::smi::smi_hardware_config::hardware_type::phx:
-        case xrt_core::smi::smi_hardware_config::hardware_type::stxA0:
-        case xrt_core::smi::smi_hardware_config::hardware_type::stxB0:
-        case xrt_core::smi::smi_hardware_config::hardware_type::stxH:
-        case xrt_core::smi::smi_hardware_config::hardware_type::krk1:
-          pt_dev.put("aie_architecture_version", "AIE2P");
-          break;
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f0:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f1:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f2:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f3:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B01:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B02:
-        case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B03:
-          pt_dev.put("aie_architecture_version", "AIE4");
-          break;
-        case xrt_core::smi::smi_hardware_config::hardware_type::aie2ps:
-          pt_dev.put("aie_architecture_version", "AIE2PS");
-          break;
-        default:
-          pt_dev.put("aie_architecture_version", "N/A");
-          break;
-        }
+        const auto hardware_type = XBUtilities::get_hardware_type(device.get());
+        const auto aie_arch = xrt_core::smi::smi_hardware_config::get_aie_architecture_version(hardware_type);
+        pt_dev.put("aie_architecture_version", aie_arch.value_or("N/A"));
       }
       catch (...) {
         // AIE architecture version wasn't added
@@ -222,7 +269,7 @@ XBUtilities::get_available_devices(bool inUserDomain)
       try {
         auto instance = xrt_core::device_query<xrt_core::query::instance>(device);
         std::string pf = device->is_userpf() ? "user" : "mgmt";
-        pt_dev.put("instance",boost::str(boost::format("%s(inst=%d)") % pf % instance));
+        pt_dev.put("instance", boost::str(boost::format("%s(inst=%d)") % pf % instance));
       }
       catch(const xrt_core::query::exception&) {
           // The instance wasn't added
@@ -233,7 +280,64 @@ XBUtilities::get_available_devices(bool inUserDomain)
 
     pt.push_back(std::make_pair("", pt_dev));
   }
+
   return pt;
+}
+
+void
+XBUtilities::resolve_device(bool is_user_domain,
+                            const boost::program_options::variables_map& vm,
+                            std::string& device_bdf)
+{
+  const auto& device_var = vm["device"];
+  if (device_var.defaulted()) {
+    if (boost::iequals(device_bdf, "default")) {
+      boost::property_tree::ptree available_devices = get_available_bdfs(is_user_domain);
+      if (available_devices.empty())
+        throw std::runtime_error("No devices found.");
+      const auto kd = available_devices.begin();
+      device_bdf = kd->second.get<std::string>("bdf");
+    }
+  }
+  else if (device_bdf.empty() || boost::iequals(device_bdf, "default")) {
+    std::cerr << "\nERROR: Option --device (-d) requires a BDF.\n";
+    std::cerr << str_available_devs(is_user_domain) << std::endl;
+    throw xrt_core::error(std::errc::operation_canceled);
+  }
+}
+
+std::vector<std::shared_ptr<SubCmd>>
+XBUtilities::filter_subcmds(bool is_user_domain,
+                            const std::string& device_bdf,
+                            const std::vector<std::shared_ptr<SubCmd>>& all_subcmds)
+{
+  if (!is_user_domain || device_bdf.empty())
+    return {};
+
+  try {
+    auto device = get_device(boost::algorithm::to_lower_copy(device_bdf), is_user_domain);
+    const auto rows = xrt_core::device_query<xrt_core::query::xrt_smi_lists>(
+      device, xrt_core::query::xrt_smi_lists::type::subcommands);
+
+    std::vector<std::shared_ptr<SubCmd>> out;
+    for (const auto& cmd : all_subcmds) {
+      const std::string& name = cmd->getName();
+      for (const auto& row : rows) {
+        const std::string& n = std::get<0>(row);
+        if (n.empty() || n != name)
+          continue;
+        // Subcommands typed "advanced" are omitted unless --advanced was passed.
+        if (std::get<2>(row) == "advanced" && !getAdvance())
+          break;
+        out.emplace_back(cmd);
+        break;
+      }
+    }
+    return out;
+  }
+  catch (const std::exception&) {
+    return {};
+  }
 }
 
 std::string
@@ -242,7 +346,7 @@ XBUtilities::str_available_devs(bool _inUserDomain)
   //gather available devices for user to pick from
   std::stringstream available_devs;
   available_devs << "\n Available devices:\n";
-  boost::property_tree::ptree available_devices = XBUtilities::get_available_devices(_inUserDomain);
+  boost::property_tree::ptree available_devices = XBUtilities::get_available_bdfs(_inUserDomain);
   for (auto& kd : available_devices) {
     boost::property_tree::ptree& dev = kd.second;
     if (boost::iequals(dev.get<std::string>("device_class"), xrt_core::query::device_class::enum_to_str(xrt_core::query::device_class::type::alveo)))
@@ -300,9 +404,13 @@ try {
   // Iterate through the available devices to find a BDF match
   // This must not open any devices! Doing do would slow down the software
   // quite a bit and cause other undesirable side affects
-auto devices = _inUserDomain ? xrt_core::get_total_devices(true).first : xrt_core::get_total_devices(false).first;
-  for (decltype(devices) i = 0; i < devices; i++) {
-    auto bdf = xrt_core::get_bdf_info(i, _inUserDomain);
+  const auto device_count = XBUtilities::get_enumerated_device_count(_inUserDomain);
+  for (xrt_core::device::id_type i = 0; i < device_count; ++i) {
+    const auto mapped = map_device_index(i, _inUserDomain);
+    const bool is_user = mapped.first;
+    const xrt_core::device::id_type domain_index = mapped.second;
+
+    auto bdf = xrt_core::get_bdf_info(domain_index, is_user);
     //if the user specifies func, compare
     //otherwise safely ignore
     auto cmp_func = [bdf](uint16_t func)
@@ -325,27 +433,31 @@ get_device_internal(xrt_core::device::id_type index, bool in_user_domain)
   static std::mutex mutex;
   std::lock_guard guard(mutex);
 
-  if (in_user_domain) {
+  const auto mapped = map_device_index(index, in_user_domain);
+  const bool is_user = mapped.first;
+  const xrt_core::device::id_type domain_index = mapped.second;
+
+  if (is_user) {
     static std::vector<std::shared_ptr<xrt_core::device>> user_devices(xrt_core::get_total_devices(true).first, nullptr);
   
-    if (user_devices.size() <= index )
+    if (user_devices.size() <= domain_index )
       throw std::runtime_error("no device present with index " + std::to_string(index));
     
-    if (!user_devices[index])
-      user_devices[index] = xrt_core::get_userpf_device(index);
+    if (!user_devices[domain_index])
+      user_devices[domain_index] = xrt_core::get_userpf_device(domain_index);
 
-    return user_devices[index];
+    return user_devices[domain_index];
   }
 
   static std::vector<std::shared_ptr<xrt_core::device>> mgmt_devices(xrt_core::get_total_devices(false).first, nullptr);
   
-  if (mgmt_devices.size() <= index )
+  if (mgmt_devices.size() <= domain_index )
     throw std::runtime_error("no device present with index " + std::to_string(index));
 
-  if (!mgmt_devices[index])
-    mgmt_devices[index] = xrt_core::get_mgmtpf_device(index);
+  if (!mgmt_devices[domain_index])
+    mgmt_devices[domain_index] = xrt_core::get_mgmtpf_device(domain_index);
 
-  return mgmt_devices[index];
+  return mgmt_devices[domain_index];
 }
 
 /*
@@ -356,7 +468,7 @@ static uint16_t
 str2index(const std::string& str, bool _inUserDomain)
 {
   //throw an error if no devices are present
-  uint64_t devices = _inUserDomain ? xrt_core::get_total_devices(true).first : xrt_core::get_total_devices(false).first;
+  uint64_t devices = XBUtilities::get_enumerated_device_count(_inUserDomain);
   if (devices == 0)
     throw std::runtime_error("No devices found");
   try {
@@ -407,7 +519,7 @@ XBUtilities::collect_devices( const std::set<std::string> &_deviceBDFs,
     xrt_core::device::id_type total = 0;
     try {
       // If there are no devices in the server a runtime exception is thrown in  mgmt.cpp probe()
-      total = (xrt_core::device::id_type) xrt_core::get_total_devices(_inUserDomain /*isUser*/).first;
+      total = XBUtilities::get_enumerated_device_count(_inUserDomain);
     } catch (...) {
       /* Do nothing */
     }
@@ -586,8 +698,9 @@ XBUtilities::get_axlf_section(const std::string& filename, axlf_section_kind kin
     throw std::runtime_error(boost::str(boost::format("Can't read axlf from %s") % filename));
 
   // Reread axlf from dsabin file, including all sections headers.
-  // Sanity check for number of sections coming from user input file
-  if (a.m_header.m_numSections > 10000)
+  // Sanity check for number of sections coming from user input file.
+  // Reject zero explicitly: (m_numSections - 1) would wrap uint32_t to ~4B (SWSPLAT-30722).
+  if (a.m_header.m_numSections == 0 || a.m_header.m_numSections > 10000) // NOLINT
     throw std::runtime_error("Incorrect file passed in");
 
   sz = sizeof (axlf) + sizeof (axlf_section_header) * (a.m_header.m_numSections - 1);
@@ -603,6 +716,15 @@ XBUtilities::get_axlf_section(const std::string& filename, axlf_section_kind kin
   if (!section)
     throw std::runtime_error("Section not found");
 
+  // Validate section bounds against the header-declared totalsize to guard
+  // against a crafted file pointing m_sectionOffset past the file (SWSPLAT-30722).
+  const uint64_t totalsize = a.m_header.m_length;
+  if (section->m_sectionOffset > totalsize ||
+      section->m_sectionSize  > totalsize - section->m_sectionOffset)
+    throw std::runtime_error(boost::str(
+      boost::format("File (%5%): section (%1%) offset/size (%2%/%3%) exceeds file totalsize (%4%)")
+      % kind % section->m_sectionOffset % section->m_sectionSize % totalsize % filename));
+
   std::vector<char> buf(section->m_sectionSize);
   in.seekg(section->m_sectionOffset);
   in.read(buf.data(), section->m_sectionSize);
@@ -611,40 +733,83 @@ XBUtilities::get_axlf_section(const std::string& filename, axlf_section_kind kin
 }
 
 std::vector<std::string>
-XBUtilities::get_uuids(const void *dtbuf)
+XBUtilities::get_uuids(const void *dtbuf, size_t buf_size)
 {
   std::vector<std::string> uuids;
-  struct fdt_header *bph = (struct fdt_header *)dtbuf;
-  uint32_t version = be32toh(bph->version);
-  uint32_t off_dt = be32toh(bph->off_dt_struct);
-  const char *p_struct = (const char *)dtbuf + off_dt;
-  uint32_t off_str = be32toh(bph->off_dt_strings);
-  const char *p_strings = (const char *)dtbuf + off_str;
-  const char *p, *s;
-  uint32_t tag;
-  int sz;
+  if (!dtbuf || buf_size < sizeof(fdt_header))
+    return uuids;
 
-  p = p_struct;
-  uuids.clear();
-  while ((tag = be32toh(GET_CELL(p))) != FDT_END) {
+  const auto* buf_begin = static_cast<const char*>(dtbuf);
+  const char* buf_end   = buf_begin + buf_size;
+
+  const auto* bph  = static_cast<const struct fdt_header*>(dtbuf);
+  uint32_t version = be32toh(bph->version);
+  uint32_t off_dt  = be32toh(bph->off_dt_struct);
+  uint32_t off_str = be32toh(bph->off_dt_strings);
+
+  // Validate offsets before forming any pointer (SWSPLAT-30722).
+  if (off_dt  >= buf_size || off_str >= buf_size)
+    throw std::runtime_error("FDT: off_dt_struct or off_dt_strings exceeds buffer");
+
+  const char *p_struct  = buf_begin + off_dt;
+  const char *p_strings = buf_begin + off_str;
+  const char *p = p_struct;
+
+  // Helper: ensure [ptr, ptr+n) lies within the buffer.
+  auto in_bounds = [&](const char* ptr, size_t n = 0) {
+    return ptr >= buf_begin && ptr <= buf_end && (buf_end - ptr) >= static_cast<ptrdiff_t>(n);
+  };
+
+  while (true) {
+    if (!in_bounds(p, sizeof(uint32_t)))
+      break;
+    
+    uint32_t tag = be32toh(GET_CELL(p));
+    if (tag == FDT_END)
+      break;
+
     if (tag == FDT_BEGIN_NODE) {
-      s = p;
-      p = PALIGN(p + strlen(s) + 1, 4);
+      if (!in_bounds(p))
+        break;
+      
+      const char* s = p;
+      // strnlen to avoid running off the buffer
+      auto max_len = static_cast<size_t>(buf_end - p);
+      size_t slen = strnlen(s, max_len);
+      if (slen == max_len)
+        break; // no null terminator within buffer
+      
+      p = PALIGN(p + slen + 1, 4);
       continue;
     }
     if (tag != FDT_PROP)
       continue;
 
-    sz = be32toh(GET_CELL(p));
-    s = p_strings + be32toh(GET_CELL(p));
+    if (!in_bounds(p, 2 * sizeof(uint32_t)))
+      break;
+    
+    int sz = static_cast<int>(be32toh(GET_CELL(p)));
+    uint32_t name_off = be32toh(GET_CELL(p));
+
     if (version < 16 && sz >= 8)
       p = PALIGN(p, 8);
 
-    if (!strcmp(s, "logic_uuid")) {
-      uuids.insert(uuids.begin(), std::string(p));
-    }
-    else if (!strcmp(s, "interface_uuid")) {
-      uuids.push_back(std::string(p));
+    // Validate the property name pointer
+    if (!in_bounds(p_strings + name_off))
+      break;
+    
+    size_t str_max = static_cast<size_t>(buf_end - (p_strings + name_off));
+    const char* s = p_strings + name_off;
+
+    // Validate the property value pointer
+    if (sz < 0 || !in_bounds(p, static_cast<size_t>(sz)))
+      break;
+
+    if (strnlen(s, str_max) < str_max) {
+      if (strcmp(s, "logic_uuid") == 0)
+        uuids.insert(uuids.begin(), std::string(p, strnlen(p, static_cast<size_t>(buf_end - p))));
+      else if (strcmp(s, "interface_uuid") == 0)
+        uuids.emplace_back(p, strnlen(p, static_cast<size_t>(buf_end - p)));
     }
 
     p = PALIGN(p + sz, 4);
@@ -660,6 +825,7 @@ static const std::map<std::string, xrt_core::query::reset_type> reset_map = {
     { "soft-kernel", xrt_core::query::reset_type(xrt_core::query::reset_key::soft_kernel, "SOFT KERNEL Reset", "", "mgmt_reset", "", "5") },
     { "aie", xrt_core::query::reset_type(xrt_core::query::reset_key::aie, "AIE Reset", "", "mgmt_reset", "", "6") },
     { "user", xrt_core::query::reset_type(xrt_core::query::reset_key::user, "HOT Reset", "", "", "", "") },
+    { "flr", xrt_core::query::reset_type(xrt_core::query::reset_key::flr, "FLR Reset", "", "", "", "") },
   };
 
 xrt_core::query::reset_type
@@ -787,6 +953,9 @@ XBUtilities::string_to_base_units(std::string str, const unit& conversion_unit)
     throw xrt_core::error(std::errc::invalid_argument);
   }
 
+  if (unit_value > 1 && size > std::numeric_limits<uint64_t>::max() / unit_value)
+    throw xrt_core::error(std::errc::invalid_argument);
+  
   size *= unit_value;
   return size;
 }
@@ -817,15 +986,21 @@ fill_xrt_versions(const boost::property_tree::ptree& pt_xrt,
   auto build_hash_date = pt_xrt.get<std::string>("build_hash_date", "N/A");
   if (!branch.empty() && !boost::iequals(branch, "N/A"))
     output << boost::format("  %-20s : %s\n") % "Branch" % branch;
+  
   if (!hash.empty() && !boost::iequals(hash, "N/A"))
     output << boost::format("  %-20s : %s\n") % "Hash" % hash;
+  
   if (!build_hash_date.empty() && !boost::iequals(build_hash_date, "N/A"))
     output << boost::format("  %-20s : %s\n") % "Hash Date" % build_hash_date;
 
   const boost::property_tree::ptree& available_drivers = pt_xrt.get_child("drivers", empty_ptree);
+  std::set<std::string> reported_drivers;
   for(auto& drv : available_drivers) {
     const boost::property_tree::ptree& driver = drv.second;
     auto drv_name = driver.get<std::string>("name", "N/A");
+    if (!reported_drivers.insert(drv_name).second)
+      continue;
+
     auto drv_hash = driver.get<std::string>("hash", "N/A");
     auto drv_ver = driver.get<std::string>("version", "N/A");
 
@@ -854,21 +1029,9 @@ fill_xrt_versions(const boost::property_tree::ptree& pt_xrt,
       if (fw_ver != "N/A")
         output << boost::format("  %-20s : %s\n") % "NPU Firmware Version" % fw_ver;
 
-      auto cert_hash = dev.get<std::string>("cert_firmware_hash", "N/A");
-      if (cert_hash != "N/A")
-        output << boost::format("  %-20s : %s\n") % "CERT Hash" % cert_hash;
-
-      auto cert_date = dev.get<std::string>("cert_firmware_date", "N/A");
-      if (cert_date != "N/A")
-        output << boost::format("  %-20s : %s\n") % "CERT Build Date" % cert_date;
-
-      auto uc_fw_version = dev.get<std::string>("uc_firmware.version", "N/A");
-      auto uc_fw_build_date    = dev.get<std::string>("uc_firmware.build_date", "N/A");
-
-      if (uc_fw_version != "N/A")
-        output << boost::format("  %-20s : %s\n") % "UC Firmware Version" % uc_fw_version;
-      if (uc_fw_build_date != "N/A")
-        output << boost::format("  %-20s : %s\n") % "UC Build Date" % uc_fw_build_date;
+      auto cert_fw_ver = dev.get<std::string>("cert_firmware_version", "N/A");
+      if (cert_fw_ver != "N/A")
+        output << boost::format("  %-20s: %s\n") % "CERT Firmware Version" % cert_fw_ver;
     }
     else
       output << boost::format("  %-20s : %s\n") % "Firmware Version" % fw_ver;
@@ -887,9 +1050,7 @@ extract_artifacts_from_archive(const xrt_core::archive* archive,
   
   for (const auto& artifact_name : artifact_names) {
     try {
-      std::string artifact_data = archive->data(artifact_name);
-      std::vector<char> artifact_binary(artifact_data.begin(), artifact_data.end());
-      artifacts_repo[artifact_name] = std::move(artifact_binary);
+      artifacts_repo.add_data(artifact_name, archive->data(artifact_name));
     } catch (const std::exception& /*e*/) {
       //Ignore files that are not found
     }
@@ -948,34 +1109,55 @@ bool
 XBUtilities::
 is_strix_hardware(xrt_core::smi::smi_hardware_config::hardware_type hw_type)
 {
-  switch (hw_type) {
-    case xrt_core::smi::smi_hardware_config::hardware_type::stxA0:
-    case xrt_core::smi::smi_hardware_config::hardware_type::stxB0:
-    case xrt_core::smi::smi_hardware_config::hardware_type::stxH:
-    case xrt_core::smi::smi_hardware_config::hardware_type::krk1:
-    case xrt_core::smi::smi_hardware_config::hardware_type::phx:
-      return true;
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f0:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f1:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f2:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_f3:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B01:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B02:
-    case xrt_core::smi::smi_hardware_config::hardware_type::npu3_B03:
-      return false;
-    default:
-      throw std::runtime_error("Unsupported hardware type");
+  return xrt_core::smi::smi_hardware_config::is_aie2_platform(hw_type);
+}
+
+xrt_core::smi::smi_hardware_config::hardware_type
+XBUtilities::
+get_hardware_type(const xrt_core::device* dev)
+{
+  if (!dev)
+    return xrt_core::smi::smi_hardware_config::hardware_type::unknown;
+
+  xrt_core::smi::smi_hardware_config smi_hrdw;
+
+  try {
+    const auto name = xrt_core::device_query_default<xrt_core::query::device_id_str>(dev, std::string{});
+    const auto hw = smi_hrdw.get_hardware_type(name);
+    if (hw != xrt_core::smi::smi_hardware_config::hardware_type::unknown)
+      return hw;
   }
+  catch (...) {
+  }
+
+  try {
+    const auto pcie_id = xrt_core::device_query<xrt_core::query::pcie_id>(dev);
+    return smi_hrdw.get_hardware_type(pcie_id);
+  }
+  catch (...) {
+  }
+
+  return xrt_core::smi::smi_hardware_config::hardware_type::unknown;
 }
 
 std::string
 XBUtilities::
 get_archive_install_path(const std::string& xrt_version)
 {
-  // NOLINTNEXTLINE(concurrency-mt-unsafe) - called only during error reporting, not performance critical
-  const char* home = std::getenv("HOME");
-  if (!home || !*home)
+  auto home = xrt_core::utils::getenv("HOME");
+  if (home.empty())
     throw std::runtime_error("HOME environment variable is not set");
   
   return std::string(home) + "/.local/share/xrt/" + xrt_version + "/amdxdna/bins";
+}
+
+void
+XBUtilities::
+printAdvancedDisclaimer()
+{
+  std::cout << "-------------------------------------------------------------------------\n";
+  std::cout << "                    DISCLAIMER  (xrt-smi --advanced)                     \n";
+  std::cout << "You are running a developer command that may change system configuration.\n";
+  std::cout << "                Continue only if you understand the risks.               \n";
+  std::cout << "-------------------------------------------------------------------------\n";
 }

@@ -18,7 +18,6 @@
 
 #include "XclBinUtilities.h"
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 #include <iostream>
 
 namespace XUtil = XclBinUtilities;
@@ -28,7 +27,7 @@ SectionIPLayout::init SectionIPLayout::initializer;
 
 SectionIPLayout::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(IP_LAYOUT, "IP_LAYOUT", boost::factory<SectionIPLayout*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(IP_LAYOUT, "IP_LAYOUT", []{ return new SectionIPLayout(); });
   sectionInfo->nodeName = "ip_layout";
 
   sectionInfo->supportedAddFormats.push_back(FormatType::json);
@@ -262,7 +261,7 @@ SectionIPLayout::marshalToJSON(char* _pDataSection,
                    % pHdr->m_ip_data[index].indices.m_index
                    % pHdr->m_ip_data[index].indices.m_pc_index
                    % pHdr->m_ip_data[index].m_base_address
-                   % pHdr->m_ip_data[index].m_name);
+                   % XUtil::bounded_fixed_cstr(pHdr->m_ip_data[index].m_name));
     } else if ((IP_TYPE)pHdr->m_ip_data[index].m_type == IP_KERNEL) {
       std::string sIPControlType = getIPControlTypeStr((IP_CONTROL)((pHdr->m_ip_data[index].properties & ((uint32_t)IP_CONTROL_MASK)) >> IP_CONTROL_SHIFT));
       XUtil::TRACE(boost::format("[%d]: m_type: %s, properties: 0x%x {m_ip_control: %s, m_interrupt_id: %d, m_int_enable: %d}, m_base_address: 0x%lx, m_name: '%s'")
@@ -273,7 +272,7 @@ SectionIPLayout::marshalToJSON(char* _pDataSection,
                    % ((pHdr->m_ip_data[index].properties & ((uint32_t)IP_INTERRUPT_ID_MASK)) >> IP_INTERRUPT_ID_SHIFT)
                    % (pHdr->m_ip_data[index].properties & ((uint32_t)IP_INT_ENABLE_MASK))
                    % pHdr->m_ip_data[index].m_base_address
-                   % pHdr->m_ip_data[index].m_name);
+                   % XUtil::bounded_fixed_cstr(pHdr->m_ip_data[index].m_name));
     } else {
       // IP_PS_KERNEL
       // if m_subtype is ST_DPU (i.e. fixed ps kernel), display "m_subtype", "m_functional" and "m_kernel_id"
@@ -286,14 +285,14 @@ SectionIPLayout::marshalToJSON(char* _pDataSection,
                    % getFunctionalStr((PS_FUNCTIONAL)pHdr->m_ip_data[index].ps_kernel.m_functional)
                    % (unsigned int)pHdr->m_ip_data[index].ps_kernel.m_kernel_id
                    % pHdr->m_ip_data[index].m_base_address
-                   % pHdr->m_ip_data[index].m_name);
+                   % XUtil::bounded_fixed_cstr(pHdr->m_ip_data[index].m_name));
       } else {
       XUtil::TRACE(boost::format("[%d]: m_type: %s, properties: 0x%x, m_base_address: 0x%lx, m_name: '%s'")
                    % index
                    % getIPTypeStr((IP_TYPE)pHdr->m_ip_data[index].m_type)
                    % pHdr->m_ip_data[index].properties
                    % pHdr->m_ip_data[index].m_base_address
-                   % pHdr->m_ip_data[index].m_name);
+                   % XUtil::bounded_fixed_cstr(pHdr->m_ip_data[index].m_name));
       }
     }
 
@@ -341,7 +340,7 @@ SectionIPLayout::marshalToJSON(char* _pDataSection,
     } else {
       ptIPEntry.put("m_base_address", "not_used");
     }
-    ptIPEntry.put("m_name", (boost::format("%s") % pHdr->m_ip_data[index].m_name).str());
+    ptIPEntry.put("m_name", XUtil::bounded_fixed_cstr(pHdr->m_ip_data[index].m_name));
 
     ptIPData.push_back({ "", ptIPEntry });   // Used to make an array of objects
   }

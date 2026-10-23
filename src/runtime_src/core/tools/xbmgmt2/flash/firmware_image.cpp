@@ -1,38 +1,23 @@
-/**
- * Copyright (C) 2019-2022 Xilinx, Inc
- * Copyright (C) 2022 Advanced Micro Devices, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. - All rights reserved
 #include "firmware_image.h"
 #include "core/common/utils.h"
 #include "core/include/xrt/detail/xclbin.h"
 
-// 3rd Party Library - Include Files
 #include <boost/format.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/tokenizer.hpp>
 
-#include <iostream>
-#include <filesystem>
-#include <fstream>
-#include <algorithm>
 #include <climits>
-#include <iomanip>
-#include <memory>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
 #include <vector>
 
 #ifdef _WIN32
@@ -130,25 +115,48 @@ static void uuid2ts(const std::string& uuid, uint64_t& ts)
     ts = strtoull(str.c_str(), nullptr, 16);
 }
 
-void getUUIDFromDTB(void *blob, uint64_t &ts, std::vector<std::string> &uuids)
+static std::vector<std::string>
+getUUIDFromDTB(const void* blob, size_t blob_len)
 {
-    struct fdt_header *bph = (struct fdt_header *)blob;
+    const char *blob_start = reinterpret_cast<const char*>(blob);
+    const char *blob_end   = blob_start + blob_len;
+
+    // need at least a complete fdt_header before reading any field
+    if (blob_len < sizeof(struct fdt_header))
+        throw std::runtime_error("DTB blob too small to contain fdt_header");
+
+    const struct fdt_header *bph = reinterpret_cast<const struct fdt_header*>(blob);
     uint32_t version = be32toh(bph->version);
-    uint32_t off_dt = be32toh(bph->off_dt_struct);
-    const char *p_struct = (const char *)blob + off_dt;
+    uint32_t off_dt  = be32toh(bph->off_dt_struct);
     uint32_t off_str = be32toh(bph->off_dt_strings);
-    const char *p_strings = (const char *)blob + off_str;
+
+    // validate that both section offsets fall inside the buffer
+    if (off_dt >= blob_len || off_str >= blob_len)
+        throw std::runtime_error("DTB blob: struct/strings offset out of range");
+
+    const char *p_struct  = blob_start + off_dt;
+    const char *p_strings = blob_start + off_str;
     const char *p, *s;
     uint32_t tag;
-    int sz;
 
+    std::vector<std::string> uuids;
     p = p_struct;
-    uuids.clear();
-    while ((tag = be32toh(GET_CELL(p))) != FDT_END)
+    while (true)
     {
+        // need 4 bytes for the tag cell
+        if (p + 4 > blob_end)
+            break;
+
+        tag = be32toh(GET_CELL(p));
+        if (tag == FDT_END)
+            break;
+
         if (tag == FDT_BEGIN_NODE)
         {
             s = p;
+            // ensure the node name is NUL-terminated within the buffer
+            if (std::find(s, blob_end, '\0') == blob_end)
+                break;
             p = PALIGN(p + strlen(s) + 1, 4);
             continue;
         }
@@ -156,23 +164,53 @@ void getUUIDFromDTB(void *blob, uint64_t &ts, std::vector<std::string> &uuids)
         if (tag != FDT_PROP)
             continue;
 
-        sz = be32toh(GET_CELL(p));
-        s = p_strings + be32toh(GET_CELL(p));
+        // need 8 bytes: 4 for sz, 4 for string offset
+        if (p + 8 > blob_end)
+            break;
+
+        // GET_CELL reads 4 bytes and advances p — two consecutive fields:
+        // [data length][name string offset]
+        uint32_t sz      = be32toh(GET_CELL(p));
+        uint32_t str_off = be32toh(GET_CELL(p));
+
+        // validate string offset within the strings block
+        if (p_strings + str_off >= blob_end)
+            break;
+
+        s = p_strings + str_off;
+        if (std::find(s, blob_end, '\0') == blob_end)
+            break;
+
         if (version < 16 && sz >= 8)
             p = PALIGN(p, 8);
 
+        // validate property data lies within the buffer
+        if (p + sz > blob_end)
+            break;
+
         if (!strcmp(s, "logic_uuid"))
         {
-            uuids.insert(uuids.begin(), std::string(p));
+            if (std::find(p, blob_end, '\0') != blob_end)
+                uuids.insert(uuids.begin(), std::string(p));
         }
-	else if (!strcmp(s, "interface_uuid"))
+        else if (!strcmp(s, "interface_uuid"))
         {
-            uuids.push_back(std::string(p));
+            if (std::find(p, blob_end, '\0') != blob_end)
+                uuids.push_back(std::string(p));
         }
         p = PALIGN(p + sz, 4);
     }
-    if (uuids.size() > 0)
-        uuid2ts(uuids[0], ts);
+    return uuids;
+}
+
+// Verify that [offset, offset+size) fits within a buffer of known length.
+// Throws on overflow or out-of-range access.
+static void
+check_section_bounds(uint64_t offset, uint64_t size, uint64_t buf_len,
+                     const char *ctx)
+{
+  if (offset > buf_len || size > buf_len - offset)
+    throw std::runtime_error(std::string(ctx) + ": section offset/size out of range");
 }
 
 DSAInfo::DSAInfo(const std::string& filename, uint64_t ts, const std::string& id, const std::string& bmcV) :
@@ -301,10 +339,14 @@ DSAInfo::DSAInfo(const std::string& filename, uint64_t ts, const std::string& id
         // Show it as ID for flashing
         const axlf_section_header* dtbSection = xclbin::get_axlf_section(ap, PARTITION_METADATA);
         if (dtbSection && timestamp == NULL_TIMESTAMP) {
+            check_section_bounds(dtbSection->m_sectionOffset, dtbSection->m_sectionSize,
+                                 ap->m_header.m_length, "DTB section");
             std::vector<char> dtbbuf(dtbSection->m_sectionSize);
             in.seekg(dtbSection->m_sectionOffset);
             in.read(dtbbuf.data(), dtbSection->m_sectionSize);
-            getUUIDFromDTB(dtbbuf.data(), timestamp, uuids);
+            uuids = getUUIDFromDTB(dtbbuf.data(), dtbbuf.size());
+            if (!uuids.empty())
+                uuid2ts(uuids[0], timestamp);
         }
         // For 2RP platform, only UUIDs are provided
         //timestamp = ap->m_header.m_featureRomTimeStamp;
@@ -317,6 +359,8 @@ DSAInfo::DSAInfo(const std::string& filename, uint64_t ts, const std::string& id
         if (bmcSection == nullptr)
             return;
         // Load entire BMC section.
+        check_section_bounds(bmcSection->m_sectionOffset, bmcSection->m_sectionSize,
+                             ap->m_header.m_length, "BMC section (DSAInfo)");
         std::vector<char> bmcbuf(bmcSection->m_sectionSize);
         in.seekg(bmcSection->m_sectionOffset);
         in.read(bmcbuf.data(), bmcSection->m_sectionSize);
@@ -367,7 +411,7 @@ bool DSAInfo::matchId(const std::string &id) const
     if (ts != 0 && ts != ULLONG_MAX && ts == timestamp)
         return true;
 
-    if (uuids.empty()) {
+    if (!uuids.empty()) {
         const std::string uuid = normalize_uuid(id);
 
         if (!strncmp(uuids[0].c_str(), uuid.c_str(), uuid.length()))
@@ -469,29 +513,36 @@ remove_xsabin_mirror(void * xsabin_buffer)
   axlf *axlf_header = reinterpret_cast<struct axlf *>(xsabin_buffer);
   uint64_t bufferSize = axlf_header->m_header.m_length;
 
-  std::stringstream strm;
-  strm << xsabin_buffer;
-  std::string str_xsabin_buffer = strm.str();
+  auto *buf_begin = reinterpret_cast<unsigned char *>(xsabin_buffer);
+  auto *buf_end   = buf_begin + bufferSize;
 
-  auto start_offset = str_xsabin_buffer.find(mirror_data_start);
-  if (start_offset == std::string::npos)
+  auto *start_ptr = std::search(buf_begin, buf_end,
+                                mirror_data_start.begin(), mirror_data_start.end());
+  if (start_ptr == buf_end)
     return; // No MIRROR DATA
 
-  auto end_offset = str_xsabin_buffer.find(mirror_data_end);
-  if (end_offset == std::string::npos)
+  auto *end_ptr = std::search(buf_begin, buf_end,
+                              mirror_data_end.begin(), mirror_data_end.end());
+  if (end_ptr == buf_end)
     return; // Badly formed mirror data (we have a start, but no end)
 
-  if (end_offset <= start_offset)
-    return;   // Tags are in the wrong order
+  if (end_ptr <= start_ptr)
+    return; // Tags are in the wrong order
+
+  uint64_t start_offset  = static_cast<uint64_t>(start_ptr - buf_begin);
+  uint64_t end_offset    = static_cast<uint64_t>(end_ptr   - buf_begin);
+
+  // Both offsets are within [0, bufferSize) by construction (search returned
+  // pointers inside [buf_begin, buf_end)), so no further range check needed.
+  uint64_t bytesRemoved = end_offset - start_offset;
+  uint64_t bytesToCopy  = bufferSize - end_offset;
 
   // Zero out memory (not really needed but done for completeness)
-  uint64_t bytesRemoved = end_offset - start_offset;
-  std::memset(reinterpret_cast<unsigned char *>(xsabin_buffer) + start_offset, 0, bytesRemoved);
+  std::memset(buf_begin + start_offset, 0, bytesRemoved);
 
   // Compress the image
-  uint64_t bytesToCopy = bufferSize - end_offset;
   if (bytesToCopy != 0)
-    std::memcpy(reinterpret_cast<unsigned char *>(xsabin_buffer) + start_offset, reinterpret_cast<unsigned char *>(xsabin_buffer) + end_offset, bytesToCopy);
+    std::memcpy(buf_begin + start_offset, buf_begin + end_offset, bytesToCopy);
 
   // Update length of the buffer
   axlf_header->m_header.m_length = bufferSize - bytesRemoved;
@@ -514,20 +565,27 @@ remove_xsabin_section(void * xsabin_buffer, enum axlf_section_kind section_to_re
     // Is this a section of interest, if not then go to the next section
     if (sectionHeaderArray[index].m_sectionKind != static_cast<uint32_t>(section_to_remove))
       continue;
+    
     // Record the buffer size
     uint64_t bufferSize = axlf_header->m_header.m_length;
 
     // Determine the data to be removed.
     uint64_t startToOffset = sectionHeaderArray[index].m_sectionOffset;
-    uint64_t startFromOffset = ((index + 1) == axlf_header->m_header.m_numSections) ?
-                                sectionHeaderArray[index].m_sectionOffset + sectionHeaderArray[index].m_sectionSize:
-                                sectionHeaderArray[index + 1].m_sectionOffset;
+    uint64_t startFromOffset = ((index + 1) == axlf_header->m_header.m_numSections)
+      ? sectionHeaderArray[index].m_sectionOffset + sectionHeaderArray[index].m_sectionSize
+      : sectionHeaderArray[index + 1].m_sectionOffset;
+
+    if (startToOffset > bufferSize
+        || startFromOffset < startToOffset
+        || startFromOffset > bufferSize)
+      throw std::runtime_error("xsabin: section offset/size out of range");
+    
     uint64_t bytesToCopy = bufferSize - startFromOffset;
     uint64_t bytesRemoved = startFromOffset - startToOffset;
 
-    if (bytesToCopy != 0) {
+    if (bytesToCopy) {
       std::memcpy(reinterpret_cast<unsigned char *>(xsabin_buffer) + startToOffset,
-                    reinterpret_cast<unsigned char *>(xsabin_buffer) + startFromOffset, bytesToCopy);
+                  reinterpret_cast<unsigned char *>(xsabin_buffer) + startFromOffset, bytesToCopy);
     }
     // -- Now do some incremental clean up of the data structures
     // Update the length and offsets AFTER this entry
@@ -546,8 +604,14 @@ remove_xsabin_section(void * xsabin_buffer, enum axlf_section_kind section_to_re
     // Remove the array entry
     void * ptrStartTo = &sectionHeaderArray[index];
     void * ptrStartFrom = &sectionHeaderArray[index+1];
-    uint64_t bytesToShift = axlf_header->m_header.m_length -
-                            (reinterpret_cast<unsigned char *>(ptrStartFrom) - reinterpret_cast<unsigned char *>(xsabin_buffer));
+    auto fromOffset = static_cast<uint64_t>(
+        reinterpret_cast<unsigned char *>(ptrStartFrom) -
+        reinterpret_cast<unsigned char *>(xsabin_buffer));
+
+    if (fromOffset > axlf_header->m_header.m_length)
+      throw std::runtime_error("xsabin: section header array extends beyond buffer");
+
+    uint64_t bytesToShift = axlf_header->m_header.m_length - fromOffset;
     std::memcpy(reinterpret_cast<unsigned char *>(ptrStartTo), reinterpret_cast<unsigned char *>(ptrStartFrom), bytesToShift);
 
     // Update data elements
@@ -616,6 +680,13 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                 return;
             }
             // Load entire BMC section.
+            check_section_bounds(bmcSection->m_sectionOffset, bmcSection->m_sectionSize,
+                                 ap->m_header.m_length, "BMC section");
+            if (bmcSection->m_sectionSize < sizeof(struct bmc)) {
+                this->setstate(failbit);
+                std::cout << "BMC section too small in "<< file << std::endl;
+                return;
+            }
             std::vector<char> bmcbuf(bmcSection->m_sectionSize);
             in_file.seekg(bmcSection->m_sectionOffset);
             in_file.read(bmcbuf.data(), bmcSection->m_sectionSize);
@@ -626,6 +697,9 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                 return;
             }
             const struct bmc *bmc = reinterpret_cast<const struct bmc *>(bmcbuf.data());
+            // Validate embedded offset/size against the section bounds.
+            check_section_bounds(bmc->m_offset, bmc->m_size,
+                                 bmcSection->m_sectionSize, "BMC image within section");
             // Load data into stream.
             bufsize = bmc->m_size;
             mBuf = new char[bufsize];
@@ -674,6 +748,13 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                 }
 
                 //load 'struct flash'
+                check_section_bounds(flashSection->m_sectionOffset, flashSection->m_sectionSize,
+                                     ap->m_header.m_length, "FLASH section");
+                if (flashSection->m_sectionSize < sizeof(struct flash)) {
+                    this->setstate(failbit);
+                    std::cout << "FLASH section too small in "<< file << std::endl;
+                    return;
+                }
                 struct flash flashMeta;
                 in_file.seekg(flashSection->m_sectionOffset);
                 in_file.read(reinterpret_cast<char *>(&flashMeta), sizeof(flashMeta));
@@ -683,6 +764,9 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                     std::cout << "Can't read FLASH section from "<< file << std::endl;
                     return;
                 }
+                // Validate embedded image offset/size against the section bounds.
+                check_section_bounds(flashMeta.m_image_offset, flashMeta.m_image_size,
+                                     flashSection->m_sectionSize, "flash image within section");
                 // Load data into stream.
                 bufsize = flashMeta.m_image_size;
                 mBuf = new char[bufsize];
@@ -716,6 +800,13 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                     return;
                 }
                 // Load entire MCS section.
+                check_section_bounds(mcsSection->m_sectionOffset, mcsSection->m_sectionSize,
+                                     ap->m_header.m_length, "MCS section");
+                if (mcsSection->m_sectionSize < sizeof(struct mcs)) {
+                    this->setstate(failbit);
+                    std::cout << "MCS section too small in "<< file << std::endl;
+                    return;
+                }
                 std::vector<char> mcsbuf(mcsSection->m_sectionSize);
                 in_file.seekg(mcsSection->m_sectionOffset);
                 in_file.read(mcsbuf.data(), mcsSection->m_sectionSize);
@@ -742,6 +833,9 @@ firmwareImage::firmwareImage(const std::string& file, imageType type) :
                     this->setstate(failbit);
                     return;
                 }
+                // Validate embedded chunk offset/size against the section bounds.
+                check_section_bounds(c->m_offset, c->m_size,
+                                     mcsSection->m_sectionSize, "MCS chunk within section");
                 // Load data into stream.
                 bufsize = c->m_size;
                 mBuf = new char[bufsize];

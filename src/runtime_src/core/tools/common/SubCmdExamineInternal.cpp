@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
@@ -9,6 +9,7 @@
 
 // Utilities
 #include "tools/common/XBUtilitiesCore.h"
+#include "tools/common/XBUtilities.h"
 namespace XBU = XBUtilities;
 
 // 3rd Party Library - Include Files
@@ -122,7 +123,7 @@ SubCmdExamineInternal::execute(const SubCmdOptions& _options) const
     return;
   }
 
-  const auto validated_format = m_format.empty() ? "json" : m_format;
+  const auto validated_format = m_format.empty() ? "JSON" : m_format;
   Report::SchemaVersion schemaVersion = Report::getSchemaDescription(validated_format).schemaVersion;
   try{
     if (vm.count("output") && m_output.empty())
@@ -147,7 +148,7 @@ SubCmdExamineInternal::execute(const SubCmdOptions& _options) const
 
   } catch (const xrt_core::error& e) {
     // Catch only the exceptions that we have generated earlier
-    std::cerr << boost::format("ERROR: %s\n") % e.what();
+    XBU::print_exception(e);
     printHelp();
     throw xrt_core::error(std::errc::operation_canceled);
   }
@@ -155,13 +156,8 @@ SubCmdExamineInternal::execute(const SubCmdOptions& _options) const
   // Determine report level
   std::vector<std::string> reportsToRun(m_reportNames);
   if (reportsToRun.empty()) {
-    if (!XBU::getAdvance()) {
-      reportsToRun.push_back("host");
-    } 
-    else {
-      print_help_internal();
-      return;
-    }
+    // Default report with or without --advanced (advanced only unlocks hidden options/reports).
+    reportsToRun.emplace_back("host");
   }
 
   if ((std::find(reportsToRun.begin(), reportsToRun.end(), "all") != reportsToRun.end()) && (reportsToRun.size() > 1)) {
@@ -216,7 +212,7 @@ SubCmdExamineInternal::execute(const SubCmdOptions& _options) const
         std::cout << boost::format("         - %s\n") % report;
 
       // Print available devices
-      const auto dev_pt = XBU::get_available_devices(true);
+      const auto dev_pt = XBU::get_available_bdfs(true);
       if(dev_pt.empty())
         std::cout << "0 devices found" << std::endl;
       else
@@ -229,7 +225,9 @@ SubCmdExamineInternal::execute(const SubCmdOptions& _options) const
   // Create the report
   std::ostringstream oSchemaOutput;
   try {
-    XBU::produce_reports(device, reportsToProcess, schemaVersion, m_elementsFilter, std::cout, oSchemaOutput);
+    XBU::produce_reports(device, reportsToProcess, schemaVersion,
+                         Report::getSchemaDescription(validated_format).optionName,
+                         m_elementsFilter, std::cout, oSchemaOutput);
   } catch (const std::exception&) {
     // Exception is thrown at the end of this function to allow for report writing
     is_report_output_valid = false;

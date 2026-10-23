@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2020-2022 Xilinx, Inc
-// Copyright (C) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
@@ -22,6 +22,7 @@ namespace po = boost::program_options;
 #include <algorithm>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 
 // ------ N A M E S P A C E ---------------------------------------------------
 using namespace XBUtilities;
@@ -242,7 +243,8 @@ XBUtilities::collect_and_validate_reports( const ReportCollection &allReportsAva
 void 
 XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device, 
                               const ReportCollection & reportsToProcess, 
-                              const Report::SchemaVersion schemaVersion, 
+                              Report::SchemaVersion schema_version,
+                              const std::string& schema_label,
                               const std::vector<std::string> & elementFilter,
                               std::ostream & consoleStream,
                               std::ostream & schemaStream)
@@ -253,7 +255,7 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
     return;
   }
 
-  if (schemaVersion == Report::SchemaVersion::unknown) {
+  if (schema_version == Report::SchemaVersion::unknown) {
     consoleStream << "Info: No action taken, 'UNKNOWN' schema value specified.\n";
     return;
   }
@@ -261,14 +263,7 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
   // Working property tree
   boost::property_tree::ptree ptRoot;
 
-  // Add schema version
-  {
-    boost::property_tree::ptree ptSchemaVersion;
-    ptSchemaVersion.put("schema", Report::getSchemaDescription(schemaVersion).optionName.c_str());
-    ptSchemaVersion.put("creation_date", xrt_core::timestamp());
-
-    ptRoot.add_child("schema_version", ptSchemaVersion);
-  }
+  ptRoot.add_child("schema_version", Report::JsonAbi::make_json_header(schema_label));
 
   bool is_report_output_valid = true;
 
@@ -280,14 +275,14 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
 
     boost::property_tree::ptree ptReport;
     try {
-      report->getFormattedReport(nullptr, schemaVersion, elementFilter, consoleStream, ptReport);
+      report->getFormattedReport(nullptr, schema_version, elementFilter, consoleStream, ptReport);
     } catch (const std::exception&) {
       is_report_output_valid = false;
     }
 
     // Only support 1 node on the root
     if (ptReport.size() > 1)
-      throw xrt_core::error((boost::format("Invalid JSON - The report '%s' has too many root nodes.") % Report::getSchemaDescription(schemaVersion).optionName).str());
+      throw xrt_core::error((boost::format("Invalid JSON - The report '%s' has too many root nodes.") % Report::getSchemaDescription(schema_version).optionName).str());
 
     // We have 1 node, copy the child to the root property tree
     if (ptReport.size() == 1) {
@@ -348,6 +343,26 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
       // proceed even if the platform name is not available
       platform = "<not defined>";
     }
+
+    const bool clear_screen = std::any_of(reportsToProcess.begin(), reportsToProcess.end(),
+      [](const std::shared_ptr<Report>& r) {
+        return r->isDeviceRequired() && r->clearScreenBeforeReports();
+      });
+
+    // When more than one device report is printed together, truncate the "live"
+    // reports against the fixed default terminal size instead of the measured
+    // size, so the combined layout is stable regardless of window size.
+    const auto device_report_count = std::count_if(reportsToProcess.begin(), reportsToProcess.end(),
+      [](const std::shared_ptr<Report>& r) { return r->isDeviceRequired(); });
+    const bool multiple_reports = device_report_count > 1;
+
+    if (clear_screen && !XBUtilities::is_escape_codes_disabled()) {
+      // 2J: clear the visible screen, H: home the cursor. Scrollback is
+      // intentionally preserved (no 3J), so prior terminal history stays
+      // available by scrolling up.
+      consoleStream << "\033[2J\033[H";
+    }
+
     // Bound the device description on top and bottom with '-' characters
     const std::string dev_desc = (boost::format("[%s] : %s\n") % ptDevice.get<std::string>("device_id") % platform).str();
     consoleStream << std::endl;
@@ -369,22 +384,28 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
     // 1. Is in factory mode and is not in recovery mode
     // 2. Is not ready and is not in recovery mode
     if ((is_mfg || !is_ready) && !is_recovery)
-      std::cout << "Warning: Device is not ready - Limited functionality available with XRT tools.\n";
+      consoleStream << "Warning: Device is not ready - Limited functionality available with XRT tools.\n";
 
     for (auto &report : reportsToProcess) {
       if (!report->isDeviceRequired())
         continue;
 
+      std::ostringstream report_buffer;
       boost::property_tree::ptree ptReport;
       try {
-        report->getFormattedReport(device.get(), schemaVersion, elementFilter, consoleStream, ptReport);
+        report->getFormattedReport(device.get(), schema_version, elementFilter, report_buffer, ptReport);
       } catch (const std::exception&) {
         is_report_output_valid = false;
       }
 
+      if (report->clearScreenBeforeReports())
+        consoleStream << XBUtilities::truncate_to_terminal(report_buffer.str(), multiple_reports, multiple_reports);
+      else
+        consoleStream << report_buffer.str();
+
       // Only support 1 node on the root
       if (ptReport.size() > 1)
-        throw xrt_core::error((boost::format("Invalid JSON - The report '%s' has too many root nodes.") % Report::getSchemaDescription(schemaVersion).optionName).str());
+        throw xrt_core::error((boost::format("Invalid JSON - The report '%s' has too many root nodes.") % Report::getSchemaDescription(schema_version).optionName).str());
 
       // We have 1 node, copy the child to the root property tree
       if (ptReport.size() == 1) {
@@ -400,16 +421,10 @@ XBUtilities::produce_reports( const std::shared_ptr<xrt_core::device>& device,
     }
   }
 
-  // -- Write the formatted output 
-  switch (schemaVersion) {
-    case Report::SchemaVersion::json_20202:
-      boost::property_tree::json_parser::write_json(schemaStream, ptRoot, true /*Pretty Print*/);
-      schemaStream << std::endl;  
-      break;
-
-    default:
-      // Do nothing
-      break;
+  // -- Write the formatted output
+  if (Report::JsonAbi::valid_user_abi(schema_version)) {
+    boost::property_tree::json_parser::write_json(schemaStream, ptRoot, true /*Pretty Print*/);
+    schemaStream << std::endl;
   }
 
   // If any the data reports failed to generate with an exception throw an operation cancelled but output everything

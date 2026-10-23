@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2016-2022 Xilinx, Inc
-// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef xrt_device_hal2_h
 #define xrt_device_hal2_h
 
@@ -8,6 +8,8 @@
 
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_bo.h"
+#include "xrt/xrt_hw_context.h"
+#include "xrt/experimental/xrt_xclbin.h"
 #include "xrt/detail/ert.h"
 
 #include "core/common/device.h"
@@ -23,8 +25,14 @@
 #include <map>
 #include <array>
 #include <mutex>
+#include <stdexcept>
 
 #include <boost/optional/optional.hpp>
+
+#ifdef _WIN32
+# pragma warning( push )
+# pragma warning ( disable : 4100 )
+#endif
 
 namespace xrt_xocl { namespace hal2 {
 
@@ -67,6 +75,9 @@ class device : public xrt_xocl::hal::device
 
   xrt::device m_handle;
   mutable boost::optional<hal2::device_info> m_devinfo;
+
+  // Active xrt::hw_context for the HAL session.
+  xrt::hw_context m_hw_ctx;
 
   mutable std::mutex m_mutex;
 
@@ -188,6 +199,18 @@ public:
   get_xrt_device() const override
   {
     return m_handle;
+  }
+
+  xrt::hw_context
+  get_xrt_hwctx(const uuid& uuid) const override
+  {
+    if (!m_hw_ctx)
+      throw std::runtime_error("no active hw context");
+
+    if (m_hw_ctx.get_xclbin_uuid() != uuid)
+      throw std::runtime_error(std::string("requested xclbin uuid does not match active hw context: ") + uuid.to_string() + "/" + m_hw_ctx.get_xclbin_uuid().to_string());
+
+    return m_hw_ctx;
   }
 
   std::shared_ptr<xrt_core::device>
@@ -613,5 +636,9 @@ public:
 };
 
 }} // hal2,xrt
+
+#ifdef _WIN32
+# pragma warning( pop )
+#endif
 
 #endif

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2019-2020 Xilinx, Inc
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef __SubCmdValidate_h_
 #define __SubCmdValidate_h_
@@ -11,17 +11,18 @@
 #include "tools/common/SubCmd.h"
 #include "tools/common/XBHelpMenus.h"
 #include "tools/common/TestRunner.h"
-#include "core/common/smi.h"
+#include "core/common/smi/smi.h"
 
 struct SubCmdValidateOptions {
   std::string m_device;
   std::string m_format;
+  std::string m_json;
   std::string m_output;
   std::string m_param;
   std::string m_xclbin_path;
   std::string m_pmode;
   std::vector<std::string> m_tests_to_run;
-  unsigned int m_iter; 
+  unsigned int m_loop; 
   bool m_elf;
   bool m_help;
 };
@@ -35,6 +36,7 @@ class SubCmdValidate : public SubCmd {
   SubCmdValidate(bool _isHidden, bool _isDepricated, bool _isPreliminary);
 
  private:
+  bool m_json_abi_platform = false;
 
   void fill_option_values(const boost::program_options::variables_map& vm, SubCmdValidateOptions& options) const;
   void handle_errors_and_validate_tests(const boost::program_options::variables_map&, 

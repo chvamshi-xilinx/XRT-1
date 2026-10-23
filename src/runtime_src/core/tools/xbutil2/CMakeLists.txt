@@ -25,7 +25,6 @@ file(GLOB XBUTIL_V2_BASE_FILES
   "../common/Process.cpp"
   "../common/Table2D.cpp"
   "../common/PsKernelUtilities.cpp"
-  "../common/SubCmdJSON.cpp"
   "../common/TestRunner.cpp"
   "../common/SmiDefault.cpp"
   "../common/tests/*.cpp"
@@ -55,6 +54,7 @@ file(GLOB XBUTIL_V2_SUBCMD_FILES
 
 add_subdirectory(EventTracing)
 add_subdirectory(FirmwareLogging)
+add_subdirectory(AutoCoreDump)
 add_subdirectory(ContextHealth)
 
 # Merge the files into one collection
@@ -68,8 +68,16 @@ else()
   set(XRT_HELPER_SCRIPTS "xrt-smi")
 endif()
 
+
 xrt_configure_version_file(${XBUTIL2_NAME} APP)
 add_executable(${XBUTIL2_NAME} ${XBUTIL2_NAME}-version.rc ${XBUTIL_V2_SRCS})
+
+if (ENABLE_ASAN)
+  # xrt-smi links static Boost (/MT). Override the global MultiThreadedDLL
+  # set by ASAN so the object files match the Boost libraries' CRT metadata.
+  set_target_properties(${XBUTIL2_NAME} PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 # Determine what functionality should be added
 if (NOT XRT_EDGE OR DEFINED XDNA_VE2)
@@ -113,14 +121,6 @@ else()
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_libraries(${XBUTIL2_NAME} PRIVATE ws2_32)
   endif()
-endif()
-
-# Package xrt sub commands json file for embedded builds
-# This file acts as sample json file and will be removed in future releases
-if (XRT_EDGE)
-  set(XRT_SUBCOMMANDS_JSON ../common/xrt_subcommands.json)
-  install(FILES ${XRT_SUBCOMMANDS_JSON}
-    DESTINATION ${XRT_INSTALL_DIR}/share COMPONENT ${XRT_BASE_COMPONENT})
 endif()
 
 # Install our built executable

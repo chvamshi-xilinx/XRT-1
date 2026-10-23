@@ -107,8 +107,9 @@ zocl_ctx_to_info(struct drm_zocl_ctx *args, struct kds_client_cu_info *cu_info)
 }
 
 /*
- * Create a new context if no active context present for this xclbin and add
- * it to the kds.
+ * Deprecated: legacy context allocation via xrt::device API.
+ * Will be removed when xrt::device context paths are fully retired;
+ * use xrt::hw_context based open/close CU context ioctls instead.
  *
  * @param	zdev:   zocl device structure
  * @param       client:	KDS client structure
@@ -167,7 +168,8 @@ zocl_add_context(struct drm_zocl_dev *zdev, struct kds_client *client,
         if (!hw_ctx) {
                 DRM_ERROR("No valid HW context is open");
 		zocl_remove_client_context(zdev, client, cctx);
-                return -EINVAL;
+			ret = -EINVAL;
+			goto out;
         }
 
         cu_ctx->hw_ctx = hw_ctx;
@@ -334,8 +336,9 @@ zocl_open_ucu(struct drm_zocl_dev *zdev, struct kds_client *client,
 }
 
 /*
- * This is an entry point for context ioctl. This function calls the
- * appropoate function based on the requested operation from the userspace.
+ * Deprecated: legacy context ioctl dispatcher via xrt::device API.
+ * Will be removed when xrt::device context paths are fully retired;
+ * use xrt::hw_context based ioctls instead.
  *
  * @param	zdev:   zocl device structure
  * @param       data:	userspace arguments
@@ -456,8 +459,9 @@ out:
 }
 
 /*
- * This function will create a kds command using the given parameters from the
- * userspace and add that to the KDS.
+ * Deprecated: legacy command submission via xrt::device API.
+ * Will be removed when xrt::device exec paths are fully retired;
+ * use xrt::hw_context based zocl_hw_ctx_execbuf instead.
  *
  * @param	zdev:   zocl device structure
  * @param       data:	userspace arguments
@@ -511,7 +515,7 @@ int zocl_command_ioctl(struct drm_zocl_dev *zdev, void *data,
 	xcmd->execbuf = (u32 *)ecmd;
 	xcmd->gem_obj = gem_obj;
 	xcmd->exec_bo_handle = args->exec_bo_handle;
-	/* Default hw context. For backward compartability */
+	/* Default hw context. For backward compatibility */
 	xcmd->hw_ctx_id = 0;
 
 	//print_ecmd_info(ecmd);

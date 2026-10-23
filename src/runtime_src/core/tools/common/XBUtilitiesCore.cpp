@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2019-2022 Xilinx, Inc
-// Copyright (C) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
@@ -8,6 +8,7 @@
 #include "XBUtilitiesCore.h"
 
 #include "core/common/error.h"
+#include "core/common/sysinfo.h"
 #include "core/common/unistd.h"
 
 // 3rd Party Library - Include Files
@@ -17,6 +18,8 @@
 
 // System - Include Files
 #include <regex>
+#include <sstream>
+#include <vector>
 
 
 // ------ N A M E S P A C E ---------------------------------------------------
@@ -26,6 +29,7 @@ using namespace XBUtilities;
 static bool m_bVerbose = false;
 static bool m_bTrace = false;
 static bool m_disableEscapeCodes = false;
+static bool m_bShowHidden = false;
 static bool m_bAdvance = false;
 static bool m_bForce = false;
 static bool m_bElf = false; 
@@ -77,14 +81,30 @@ XBUtilities::setTrace(bool _bTrace)
   m_bTrace = _bTrace;
 }
 
+void
+XBUtilities::setShowHidden(bool _bShowHidden)
+{
+  if (_bShowHidden)
+    trace("Hidden commands and options will be shown.");
+  else
+    trace("Hidden commands and options will be hidden");
+
+  m_bShowHidden = _bShowHidden;
+}
+
+bool
+XBUtilities::getShowHidden()
+{
+  return m_bShowHidden;
+}
 
 void
 XBUtilities::setAdvance(bool _bAdvance)
 {
   if (_bAdvance)
-    trace("Hidden commands and options will be shown.");
+    trace("Advanced commands and options will be shown.");
   else
-    trace("Hidden commands and options will be hidden");
+    trace("Advanced commands and options will be hidden");
 
   m_bAdvance = _bAdvance;
 }
@@ -121,6 +141,76 @@ XBUtilities::disable_escape_codes(bool _disable)
 bool
 XBUtilities::is_escape_codes_disabled() {
   return m_disableEscapeCodes;
+}
+
+std::pair<unsigned int, unsigned int>
+XBUtilities::get_terminal_size()
+{
+  // Conservative fallback used when the size cannot be determined (e.g. the
+  // output stream is not attached to a real console, or the current system
+  // shim does not implement the query).
+  constexpr unsigned int default_rows = 24;
+  constexpr unsigned int default_cols = 80;
+
+  try {
+    const auto [rows, cols] = xrt_core::sysinfo::get_terminal_size();
+    if (rows > 0 && cols > 0)
+      return {rows, cols};
+  }
+  catch (const std::exception&) {
+    // Not implemented / not a terminal; fall back to the default below.
+  }
+
+  return {default_rows, default_cols};
+}
+
+std::string
+XBUtilities::truncate_to_terminal(const std::string& content, bool use_default_terminal_size, bool show_truncation_notice)
+{
+  // Batch mode / redirected output: return the full content untouched so that
+  // scripted output stays complete.
+  if (is_escape_codes_disabled())
+    return content;
+
+  // Split the content into individual lines.
+  std::vector<std::string> lines;
+  std::string::size_type start = 0;
+  while (start <= content.size()) {
+    const auto pos = content.find('\n', start);
+    if (pos == std::string::npos) {
+      if (start < content.size())
+        lines.push_back(content.substr(start));
+      break;
+    }
+    lines.push_back(content.substr(start, pos - start));
+    start = pos + 1;
+  }
+
+  // get_terminal_size() returns {rows, cols}; only the row count is needed here.
+  // When multiple reports are printed together, use the fixed default row count
+  // for a stable layout instead of measuring the current terminal.
+  constexpr unsigned int default_rows = 24;
+  const unsigned int term_rows = use_default_terminal_size ? default_rows : get_terminal_size().first;
+  // Reserve rows for the shell prompt, and (when the notice is shown) an extra
+  // two rows for the notice and a trailing blank separator line.
+  const unsigned int reserved_rows = show_truncation_notice ? 3 : 1;
+  const unsigned int visible_rows = (term_rows > reserved_rows) ? (term_rows - reserved_rows) : 1;
+
+  if (lines.size() <= visible_rows)
+    return content;
+
+  std::ostringstream out;
+  for (unsigned int i = 0; i < visible_rows; ++i)
+    out << lines[i] << "\n";
+
+  // When requested, note that content was dropped and how to see the full
+  // report, followed by a blank line separating this report from the next.
+  if (show_truncation_notice) {
+    out << "INFO:  additional entries not shown - use --batch or redirect to a file to see the full report\n";
+    out << "\n";
+  }
+
+  return out.str();
 }
 
 

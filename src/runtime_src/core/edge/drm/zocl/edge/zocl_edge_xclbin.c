@@ -21,27 +21,6 @@
 #include "xrt_xclbin.h"
 #include "xclbin.h"
 
-static inline u32 xclbin_protocol(u32 prop)
-{
-	u32 intr_id = prop & IP_CONTROL_MASK;
-
-	return intr_id >> IP_CONTROL_SHIFT;
-}
-
-static inline u32 xclbin_intr_enable(u32 prop)
-{
-	u32 intr_enable = prop & IP_INT_ENABLE_MASK;
-
-	return intr_enable;
-}
-
-static inline u32 xclbin_intr_id(u32 prop)
-{
-	u32 intr_id = prop & IP_INTERRUPT_ID_MASK;
-
-	return intr_id >> IP_INTERRUPT_ID_SHIFT;
-}
-
 
 /*
  * Cache the xclbin blob so that it can be shared by processes.
@@ -79,15 +58,6 @@ zocl_cache_xclbin(struct drm_zocl_dev *zdev, struct drm_zocl_slot *slot,
 	return 0;
 }
 
-static bool
-is_aie_only(struct axlf *axlf)
-{
-	if ((axlf->m_header.m_actionMask & AM_LOAD_AIE))
-		return true;
-
-	return false;
-}
-
 /*
  * This function is the main entry point to load xclbin. It's takes an userspace
  * pointer of xclbin and copy the xclbin data to kernel space. Then load that
@@ -115,7 +85,11 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 	void *aie_res = 0;
 	int ret = 0;
 	struct drm_zocl_slot *slot = NULL;
-	uint32_t qos = 0;
+	uint32_t flags = 0;
+	bool dt_overlay = false;
+	bool dt_overlay_dirty = false;
+	/* Userspace libdfx already programmed the device and applied its dtbo */
+	bool programmed_by_libdfx = axlf_obj->za_dtbo_path_len;
 	uint8_t hw_gen = axlf_obj->hw_gen;
 
 	/* Download the XCLBIN from user space to kernel space and validate */
@@ -163,6 +137,13 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 		return -EFAULT;
 	}
 
+	/*
+	 * Two copies of the same user pointer race. The buffer
+	 * was sized from axlf_head, so every later walk must use that header
+	 * rather than a second-fetch m_numSections / m_length.
+	 */
+	memcpy(&axlf->m_header, &axlf_head.m_header, sizeof(axlf->m_header));
+
 	xclbin = (char __user *)axlf_obj->za_xclbin_ptr;
 	ret = !ZOCL_ACCESS_OK(VERIFY_READ, xclbin, axlf_head.m_header.m_length);
 	if (ret) {
@@ -171,13 +152,12 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 		return -EFAULT;
 	}
 
-	/* TODO : qos need to define */
-	qos |= axlf_obj->za_flags;
+	flags = axlf_obj->za_flags;
 	slot = zdev->pr_slot[slot_id];
 
 	mutex_lock(&slot->slot_xclbin_lock);
 	if (zocl_xclbin_same_uuid(slot,  &axlf_head.m_header.uuid)) {
-		if (qos & DRM_ZOCL_FORCE_PROGRAM) {
+		if (flags & DRM_ZOCL_FORCE_PROGRAM) {
 			// We come here if user sets force_xclbin_program
 			// option "true" in xrt.ini under [Runtime] section
 			DRM_WARN("%s Force xclbin download", __func__);
@@ -186,7 +166,16 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 			//since AIE reset happened load xclbin again
 			DRM_WARN("%s After AIE reset, loading xclbin again", __func__);
 
-		} else if (!is_aie_only(axlf)) {
+		} else if (xrt_xclbin_get_section_num(axlf, AIE_METADATA) &&
+			   (!slot->aie || !slot->aie->aie_dev)) {
+			/*
+			 * Same UUID, but the last hw context released the AIE
+			 * partition. Reload so the new overlay gets a partition.
+			 */
+			DRM_INFO("AIE partition is gone on slot=%d, reload xclbin\n",
+				 slot_id);
+
+		} else if (!zocl_xclbin_is_aie_only(axlf)) {
 			DRM_INFO("xclbin already downloaded to slot=%d", slot_id);
 			vfree(axlf);
 			mutex_unlock(&slot->slot_xclbin_lock);
@@ -201,7 +190,7 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 
 	zocl_read_sect(AIE_RESOURCES, &aie_res, axlf, xclbin);
 
-	/* 1. We locked &zdev->slot_xclbin_lock so that no new contexts
+	/* 1. We locked slot->slot_xclbin_lock so that no new contexts
 	 * can be opened and/or closed
 	 * 2. A opened context would lock bitstream and hold it.
 	 * 3. If all contexts are closed, new kds would make sure all
@@ -224,37 +213,78 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 	if (xrt_xclbin_get_section_num(axlf, PARTITION_METADATA) &&
 	    axlf_head.m_header.m_mode != XCLBIN_HW_EMU &&
 	    axlf_head.m_header.m_mode != XCLBIN_HW_EMU_PR) {
+		bool pl_load = !zocl_xclbin_is_aie_only(axlf);
+
 		/*
 		 * Perform dtbo overlay for both static and rm region
 		 * axlf should have dtbo in PARTITION_METADATA section and
 		 * bitstream in BITSTREAM section.
+		 *
+		 * Suppress our overlay notifier, it would retake
+		 * slot_xclbin_lock. Only a PL load applies an overlay.
 		 */
+		if (pl_load) {
+			WRITE_ONCE(zdev->overlay_self_task, current);
+			dt_overlay_dirty = true;
+		}
 		ret = zocl_load_sect(zdev, axlf, xclbin, PARTITION_METADATA,
 				    slot);
+		if (pl_load)
+			WRITE_ONCE(zdev->overlay_self_task, NULL);
 		if (ret)
 			goto out0;
+		dt_overlay = true;
 
 	} else
 #endif
-	if (is_aie_only(axlf)) {
+	if (zocl_xclbin_needs_pdi_load(axlf)) {
 
-		ret = zocl_load_aie_only_pdi(zdev, slot, axlf, xclbin, client);
-		if (ret)
+		if (client && client->aie_ctx == ZOCL_CTX_SHARED) {
+			DRM_ERROR("%s Shared context can not load xclbin",
+				  __func__);
+			ret = -EPERM;
 			goto out0;
+		}
+
+		if (axlf_obj->za_dtbo_path_len) {
+			/*
+			 * PL image and dtbo were already loaded by libdfx
+			 * in userspace (PDI/OVERLAY xclbin path).
+			 */
+			DRM_INFO("Skipping kernel PDI load; device programmed via libdfx\n");
+		} else {
+			ret = zocl_load_sect(zdev, axlf, xclbin, PDI, slot);
+			if (ret)
+				goto out0;
+		}
+
+		/* Mark AIE out of reset state after load PDI */
+		if (slot->aie) {
+			mutex_lock(&slot->aie_lock);
+			slot->aie->aie_reset = false;
+			mutex_unlock(&slot->aie_lock);
+		}
 
 		zocl_cache_xclbin(zdev, slot, axlf, xclbin);
 
 	} else if ((axlf_obj->za_flags & DRM_ZOCL_PLATFORM_FLAT) &&
-		   axlf_head.m_header.m_mode == XCLBIN_FLAT &&
-		   axlf_head.m_header.m_mode != XCLBIN_HW_EMU &&
-		   axlf_head.m_header.m_mode != XCLBIN_HW_EMU_PR) {
-		/*
-		 * Load full bitstream, enabled in xrt runtime config
-		 * and xclbin has full bitstream and its not hw emulation
-		 */
-		ret = zocl_load_sect(zdev, axlf, xclbin, BITSTREAM, slot);
-		if (ret)
-			goto out0;
+		   axlf_head.m_header.m_mode == XCLBIN_FLAT) {
+		if (programmed_by_libdfx) {
+			/*
+			 * PL image and dtbo were already loaded by libdfx
+			 * in userspace (BITSTREAM/DTBO xclbin path).
+			 */
+			DRM_INFO("Skipping kernel BITSTREAM load; device programmed via libdfx\n");
+		} else {
+			/*
+			 * Load full bitstream, enabled in xrt runtime config
+			 * and xclbin has full bitstream and its not hw emulation
+			 */
+			ret = zocl_load_sect(zdev, axlf, xclbin, BITSTREAM,
+					    slot);
+			if (ret)
+				goto out0;
+		}
 	} else {
 
 		if (!(axlf_obj->za_flags & DRM_ZOCL_PLATFORM_PR)) {
@@ -270,23 +300,34 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 				zocl_cleanup_aie(slot);
 			}
 
-			/*
-			 * Make sure we load PL bitstream first,
-			 * if there is one, before loading AIE PDI.
-			 */
-			ret = zocl_load_sect(zdev, axlf, xclbin, BITSTREAM,
-					    slot);
-			if (ret)
-				goto out0;
+			if (programmed_by_libdfx) {
+				/*
+				 * PL image and dtbo were already loaded by
+				 * libdfx in userspace (BITSTREAM_PARTIAL_PDI
+				 * or PDI with DTBO/OVERLAY xclbin path).
+				 */
+				DRM_INFO("Skipping kernel PL/PDI load; device programmed via libdfx\n");
+			} else {
+				/*
+				 * Make sure we load PL bitstream first,
+				 * if there is one, before loading AIE PDI.
+				 */
+				ret = zocl_load_sect(zdev, axlf, xclbin,
+						    BITSTREAM, slot);
+				if (ret)
+					goto out0;
 
-			ret = zocl_load_sect(zdev, axlf, xclbin,
-			    BITSTREAM_PARTIAL_PDI, slot);
-			if (ret)
-				goto out0;
+				ret = zocl_load_sect(zdev, axlf, xclbin,
+						    BITSTREAM_PARTIAL_PDI,
+						    slot);
+				if (ret)
+					goto out0;
 
-			ret = zocl_load_sect(zdev, axlf, xclbin, PDI, slot);
-			if (ret)
-				goto out0;
+				ret = zocl_load_sect(zdev, axlf, xclbin,
+						    PDI, slot);
+				if (ret)
+					goto out0;
+			}
 		}
 	}
 
@@ -336,17 +377,42 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 
 	zocl_xclbin_set_uuid(zdev, slot, &axlf_head.m_header.uuid);
 
-	/* Destroy the CUs specific for this slot */
-	zocl_destroy_cu_slot(zdev, slot->slot_idx);
+	/* Skip creating CUs for AIE only xclbin */
+	if (!zocl_xclbin_is_aie_only(axlf)) {
+		struct device_node *fpga_np = NULL;
 
-	/* Create the CUs for this slot */
-	ret = zocl_create_cu(zdev, slot);
-	if (ret)
-		goto out0;
+		/* Destroy the CUs specific for this slot */
+		zocl_destroy_cu_slot(zdev, slot->slot_idx);
 
-	ret = zocl_kds_update(zdev, slot, &axlf_obj->kds_cfg);
-	if (ret)
-		goto out0;
+		/*
+		 * Set force_polling from the incoming config before zocl_cu_intc_refresh()
+		 * so that refresh skips INTC creation in polling mode. zocl_create_cu()
+		 * must come after refresh so CUs register with the new (or absent) INTC.
+		 */
+		zdev->kds.force_polling = axlf_obj->kds_cfg.polling;
+
+		/*
+		 * Refresh CU IRQ routing when this xclbin applied a DT overlay
+		 * (including libdfx userspace dtbo via za_dtbo_path_len), or
+		 * when fpga_accelerator was applied earlier (e.g. fpgautil)
+		 * and a plain xclbin is loaded without PARTITION_METADATA.
+		 */
+		fpga_np = of_find_node_by_name(NULL, "fpga_accelerator");
+		if (dt_overlay || axlf_obj->za_dtbo_path_len || (fpga_np &&
+		    of_property_present(fpga_np, "interrupts-extended")))
+			zocl_cu_intc_refresh(zdev);
+		if (fpga_np)
+			of_node_put(fpga_np);
+
+		/* Create the CUs for this slot (after INTC refresh so CUs register correctly) */
+		ret = zocl_create_cu(zdev, slot);
+		if (ret)
+			goto out0;
+
+		ret = zocl_kds_update(zdev, slot, &axlf_obj->kds_cfg);
+		if (ret)
+			goto out0;
+	}
 
 	DRM_INFO("xclbin %pUb successfully loaded to slot %d\n",
 			zocl_xclbin_get_uuid(slot), slot_id);
@@ -354,6 +420,12 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 	goto done;
 
 out0:
+	/* The old overlay or PL may be gone, drop the stale CUs and IRQ routing. */
+	if (dt_overlay_dirty) {
+		zocl_destroy_cu_slot(zdev, slot->slot_idx);
+		zocl_cu_intc_refresh(zdev);
+	}
+
 	DRM_ERROR("%s: failed to load xclbin %pUb to slot %d ret: %d\n",
 			__func__, zocl_xclbin_get_uuid(slot), slot_id, ret);
 

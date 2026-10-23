@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+
+#pragma once
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "core/common/device.h"
+#include "core/common/smi/smi.h"
+
+namespace xrt_core::smi::ryzen {
+
+// Ryzen / NPU xrt-smi JSON config generators (shared by XDNA shim, MCDM, etc.).
+class config_gen_ryzen : public xrt_core::smi::config_generator {
+protected:
+  std::vector<xrt_core::smi::basic_option> validate_test_desc;
+  std::vector<xrt_core::smi::basic_option> examine_report_desc;
+
+public:
+  config_gen_ryzen() = default;
+
+  virtual const std::vector<xrt_core::smi::basic_option>&
+  get_validate_test_desc() const
+  {
+    return validate_test_desc;
+  }
+
+  virtual const std::vector<xrt_core::smi::basic_option>&
+  get_examine_report_desc() const
+  {
+    return examine_report_desc;
+  }
+
+  xrt_core::smi::subcommand
+  create_validate_subcommand() override;
+
+  xrt_core::smi::subcommand
+  create_examine_subcommand() override;
+
+  xrt_core::smi::subcommand
+  create_configure_subcommand() override;
+
+  // Creates the "reset" subcommand; std::nullopt when reset is not supported.
+  virtual std::optional<xrt_core::smi::subcommand>
+  create_reset_subcommand()
+  {
+    return std::nullopt;
+  }
+
+};
+
+class config_gen_phoenix : public config_gen_ryzen {
+public:
+  config_gen_phoenix();
+};
+
+class config_gen_aie2ps : public config_gen_ryzen {
+public:
+  config_gen_aie2ps();
+};
+
+void
+populate_smi_instance(xrt_core::smi::smi* smi_instance, const xrt_core::device* device);
+
+XRT_CORE_COMMON_EXPORT
+std::string
+get_smi_config(const xrt_core::device* device);
+
+XRT_CORE_COMMON_EXPORT
+xrt_core::smi::tuple_vector
+get_subcommands_list(const xrt_core::device* device);
+
+} // namespace xrt_core::smi::ryzen

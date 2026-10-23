@@ -7,7 +7,7 @@
 #include <map>
 #include <string>
 
-// UC Log Schema Version 0.25
+// UC Log Schema Version 0.26
 // This file defines UC log schema mappings for parsing binary log messages
 // from the firmware. It includes mappings for file IDs to filenames and
 // log IDs to format strings.
@@ -66,7 +66,7 @@ uc_log_schema = {
     {11, "Exception!!\n\tESR: 0x%x EAR: 0x%x\n"},
     {12, "Error %d initializing XIOModule!"},
     {13, "Page-in to slot %u length 0x%x cur_save_level 0x%x\n"},
-    {14, "[preemption] job: %u\n"},
+    {14, "[yield] job: %u\n"},
     {15, "[block] job: %u\n"},
     {16, "[start] job: %u\n"},
     {17, "[launch] job: %u (%u)\n"},
@@ -75,7 +75,7 @@ uc_log_schema = {
     {20, "OPCODE entering barrier (id: %d slot: %d)\n"},
     {21, "LB %u check-in\n"},
     {22, "LB %u release\n"},
-    {23, "patch address (r%d r%d) "},
+    {23, "patch address (r%d r%d)\n"},
     {24, "0x%x : 0x%x\n"},
     {25, "collect trace info at offset %d\n"},
     {26, "invalid trace control body address: 0x%x\n"},
@@ -100,7 +100,7 @@ uc_log_schema = {
     {45, "Page-in to slot %u length 0x%x\n"},
     {46, "Page-in to slot %u length 0x%x cur_save_level %d\n"},
     {47, "Partition: [%u, %u], self = %u\n"},
-    {48, "Log buffer: [0x%x 0x%x] "},
+    {48, "Log buffer: [0x%x 0x%x]\n"},
     {49, "size = 0x%x, id: %d\n"},
     {50, "tct %x fsl %x\n"},
     {51, "tct %x tlast = %x\n"},
@@ -123,24 +123,24 @@ uc_log_schema = {
     {68, "handle dbg queue...\n"},
     {69, "DBG queue packet opcode: %u\n"},
     {70, "do_dbg_rw\n"},
-    {71, "Page-in to slot %u page offset 0x%x "},
+    {71, "Page-in to slot %u page offset 0x%x\n"},
     {72, "cur_save_level 0x%x\n"},
-    {73, "[TIMESTAMP][ID] %d "},
+    {73, "[TIMESTAMP][ID] %d\n"},
     {74, "[HIGH] %d [LOW] %d\n"},
-    {75, "    job: %d state: %d "},
+    {75, "    job: %d state: %d\n"},
     {76, "pc: 0x%x\n"},
-    {77, "Page-in to slot %u length 0x%x "},
+    {77, "Page-in to slot %u length 0x%x\n"},
     {78, "cur_save_level %d\n"},
-    {79, "Exception!!\n\tESR: 0x%x EAR: 0x%x "},
+    {79, "Exception!!\n\tESR: 0x%x EAR: 0x%x\n"},
     {80, "PC: 0x%x\n"},
-    {81, "Partition: [%u, %u], "},
+    {81, "Partition: [%u, %u]\n"},
     {82, "self = %u\n"},
     {83, "Waken up after preempted?\n"},
     {84, "prefetch load last elf: %d ...\n"},
     {85, "Page-in last elf to slot %u\n"},
     {86, "load elf skip\n"},
     {87, "load elf ...\n"},
-    {88, "fw_state: 0x%x\n"},
+    {88, "fw_state before hang is detected: 0x%x\n"},
     {89, "qh: 0x%x ql: 0x%x\n"},
     {90, "mpnpu base time: high 0x%x low 0x%x\n"},
     {91, "shim dma mm2s status: addr 0x%x value 0x%x\n"},
@@ -174,7 +174,26 @@ uc_log_schema = {
     {119, "q new read index high %d : low %d\n"},
     {120, "q old write index high %d : low %d\n"},
     {121, "q old read index high %d : low %d\n"},
-    {122, "\n"}
+    {122, "Trigger completion interrupt\n"},
+    {123, "Trigger idle interrupt\n"},
+    {124, "Trigger miscellaneous interrupt\n"},
+    {125, "Trigger common interrupt\n"},
+    {126, "Skip %d cmds in runlist\n"},
+    {127, "Leaving barrier: conditional job\n"},
+    {128, "break early same page same job\n"},
+    {129, "load pdi id %d at page index %d\n"},
+    {130, "load axi-mm elf id %d at page index %d\n"},
+    {131, "load cp elf id %d in page %d\n"},
+    {132, "out of order page-in page %d\n"},
+    {133, "in order page-in page %d\n"},
+    {134, "save level page-in page %d\n"},
+    {135, "load last pdi id %d at page index %d\n"},
+    {136, "host queue version read, major: %d minor: %d\n"},
+    {137, "npi error caught\n"},
+    {138, "restore L2 done & load_last_pdi start\n"},
+    {139, "restore done\n"},
+    {140, "assert\n"},
+    {141, "\n"}
   }
 };
 

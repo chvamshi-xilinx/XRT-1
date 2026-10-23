@@ -49,13 +49,16 @@ public:
   err_code end();
   err_code end(unsigned long long cycleTimeout);
   err_code update(const rtp_config* pRTPConfig, const void* pValue, size_t numBytes);
+  err_code update_nb(const rtp_config* pRTPConfig, const void* pValue, size_t numBytes);
   err_code read(const rtp_config* pRTPConfig, void* pValue, size_t numBytes);
+  err_code read_nb(const rtp_config* pRTPConfig, void* pValue, size_t numBytes);
   err_code update(const shared_buffer_config* pSharedBufferConfig, const void* pValue, size_t numBytes);
 
 private:
   const graph_config* pGraphConfig;
   bool isConfigured;
   bool isRunning;
+  bool isInfiniteRun; //graph was started with a negative iteration count, cores never report done
   unsigned long long startTime;
 
   std::vector<XAie_LocType> coreTiles;

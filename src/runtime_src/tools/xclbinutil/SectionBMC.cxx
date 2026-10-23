@@ -19,7 +19,6 @@
 #include "XclBinUtilities.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
 namespace XUtil = XclBinUtilities;
@@ -34,7 +33,7 @@ SectionBMC::init SectionBMC::initializer;
 
 SectionBMC::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(BMC, "BMC", boost::factory<SectionBMC*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(BMC, "BMC", []{ return new SectionBMC(); });
   sectionInfo->supportsSubSections = true;
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::fw));
   sectionInfo->subSections.push_back(getSubSectionName(SubSection::metadata));
@@ -158,11 +157,9 @@ SectionBMC::copyBufferUpdateMetadata(const char* _pOrigDataSection,
                % pHdr->m_version
                % pHdr->m_md5value);
 
-  uint64_t expectedSize = pHdr->m_offset + pHdr->m_size;
-
-  // Check to see if array size
-  if (expectedSize > _origSectionSize) {
-    auto errMsg = boost::format("ERROR: bmc section size (0x%lx) exceeds the given segment size (0x%lx).") % expectedSize % _origSectionSize;
+  // Guard against uint64_t overflow before comparing against section size
+  if (pHdr->m_size > _origSectionSize || pHdr->m_offset > _origSectionSize - pHdr->m_size) {
+    auto errMsg = boost::format("ERROR: bmc m_offset (0x%lx) + m_size (0x%lx) exceeds the given segment size (0x%lx).") % pHdr->m_offset % pHdr->m_size % _origSectionSize;
     throw std::runtime_error(errMsg.str());
   }
 

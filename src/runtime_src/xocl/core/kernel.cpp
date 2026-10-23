@@ -1,19 +1,6 @@
-/**
- * Copyright (C) 2016-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2021 Xilinx, Inc.  All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #include "kernel.h"
 #include "program.h"
 #include "context.h"
@@ -31,7 +18,7 @@
 #include <regex>
 
 #ifdef _WIN32
-#pragma warning ( disable : 4267 4245 )
+#pragma warning ( disable : 4267 )
 #endif
 
 namespace xocl {
@@ -161,7 +148,7 @@ kernel(program* prog, const std::string& name, xrt::xclbin::kernel xk)
 
   // Construct kernel run object for each device
   for (auto device: prog->get_device_range()) {
-    xrt::kernel xkernel(device->get_xrt_device(), prog->get_xclbin_uuid(device), name);
+    xrt::kernel xkernel(device->get_xrt_hwctx(prog->get_xclbin_uuid(device)), name);
 
     // The run object must limit the CUs to those of the OpenCL device,
     // which could be a sub-device.  Since kernel is not tied to a particular

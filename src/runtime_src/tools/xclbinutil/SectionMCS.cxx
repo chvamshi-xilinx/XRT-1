@@ -20,7 +20,6 @@
 #include "XclBinUtilities.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
-#include <boost/functional/factory.hpp>
 
 // Disable windows compiler warnings
 #ifdef _WIN32
@@ -35,7 +34,7 @@ SectionMCS::init SectionMCS::initializer;
 
 SectionMCS::init::init()
 {
-  auto sectionInfo = std::make_unique<SectionInfo>(MCS, "MCS", boost::factory<SectionMCS*>());
+  auto sectionInfo = std::make_unique<SectionInfo>(MCS, "MCS", []{ return new SectionMCS(); });
   sectionInfo->supportsSubSections = true;
   sectionInfo->subSections.push_back(getSubSectionName(MCS_PRIMARY));
   sectionInfo->subSections.push_back(getSubSectionName(MCS_SECONDARY));
@@ -242,21 +241,21 @@ SectionMCS::extractBuffers(const char* _pDataSection,
 
     XUtil::TRACE_BUF("m_chunk", reinterpret_cast<const char*>(&(pHdr->m_chunk[index])), sizeof(mcs_chunk));
 
-    const char* ptrImageBase = _pDataSection + pHdr->m_chunk[index].m_offset;
-
-    // Check to make sure that the MCS image is partially looking good
-    if ((uint64_t)ptrImageBase > ((uint64_t)_pDataSection) + _sectionSize) {
-      auto errMsg = boost::format("ERROR: MCS image %d start offset exceeds MCS segment size.") % index;
+    // Validate offset and size directly in offset-space to avoid pointer wraparound (CWE-190)
+    const uint64_t chunkOffset = pHdr->m_chunk[index].m_offset;
+    const uint64_t chunkSize   = pHdr->m_chunk[index].m_size;
+    if (chunkOffset >= _sectionSize) {
+      auto errMsg = boost::format("ERROR: MCS image %d start offset (0x%lx) exceeds MCS segment size (0x%lx).") % index % chunkOffset % _sectionSize;
       throw std::runtime_error(errMsg.str());
     }
-
-    if (((uint64_t)ptrImageBase) + pHdr->m_chunk[index].m_size > ((uint64_t)_pDataSection) + _sectionSize) {
-      auto errMsg = boost::format("ERROR: MCS image %d size exceeds the MCS segment size.") % index;
+    if (chunkSize > _sectionSize - chunkOffset) {
+      auto errMsg = boost::format("ERROR: MCS image %d size (0x%lx) exceeds the MCS segment size.") % index % chunkSize;
       throw std::runtime_error(errMsg.str());
     }
+    const char* ptrImageBase = _pDataSection + chunkOffset;
 
     std::ostringstream* pBuffer = new std::ostringstream;
-    pBuffer->write(ptrImageBase, pHdr->m_chunk[index].m_size);
+    pBuffer->write(ptrImageBase, chunkSize);
 
     _mcsBuffers.emplace_back((MCS_TYPE)pHdr->m_chunk[index].m_type, pBuffer);
   }

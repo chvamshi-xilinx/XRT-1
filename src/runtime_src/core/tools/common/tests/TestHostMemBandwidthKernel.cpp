@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
@@ -11,16 +11,14 @@ namespace XBU = XBUtilities;
 #include <boost/property_tree/json_parser.hpp>
 #include <filesystem>
 #include <math.h>
+#include "xrt/experimental/xrt_xclbin.h"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
+#include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
+#include "core/common/utils.h"
 
-#ifdef _WIN32
-#pragma warning(disable : 4996) //std::getenv
-#pragma warning(disable : 4702) //TODO remove when test is implemented properly
-#endif
-
-static const int reps = (std::getenv("XCL_EMULATION_MODE") != nullptr) ? 2 : 10000;
+static const int reps = xrt_core::utils::is_env("XCL_EMULATION_MODE") ? 2 : 10000;
 
 // ----- C L A S S   M E T H O D S -------------------------------------------
 TestHostMemBandwidthKernel::TestHostMemBandwidthKernel()
@@ -29,7 +27,7 @@ TestHostMemBandwidthKernel::TestHostMemBandwidthKernel()
               "bandwidth.xclbin"){}
 
 boost::property_tree::ptree
-TestHostMemBandwidthKernel::run(const std::shared_ptr<xrt_core::device>& dev)
+TestHostMemBandwidthKernel::run(const std::shared_ptr<xrt_core::device>&)
 {
   boost::property_tree::ptree ptree = get_test_header();
 
@@ -37,6 +35,7 @@ TestHostMemBandwidthKernel::run(const std::shared_ptr<xrt_core::device>& dev)
   ptree.put("status", XBValidateUtils::test_token_skipped);
   return ptree;
 
+#if 0
   uint64_t shared_host_mem = 0;
   try {
     shared_host_mem = xrt_core::device_query<xrt_core::query::shared_host_mem>(dev);
@@ -53,6 +52,7 @@ TestHostMemBandwidthKernel::run(const std::shared_ptr<xrt_core::device>& dev)
   }
   runTest(dev, ptree);
   return ptree;
+#endif
 }
 
 void
@@ -97,13 +97,15 @@ TestHostMemBandwidthKernel::runTest(const std::shared_ptr<xrt_core::device>& dev
   }
 
   std::string krnl_name = "bandwidth";
-  xrt::uuid xclbin_uuid;
+  xrt::xclbin xclbin;
   if (retVal == EOPNOTSUPP) {
     krnl_name = "slavebridge";
-    xclbin_uuid = device.load_xclbin(old_binary_file.string());
+    xclbin = xrt::xclbin(old_binary_file.string());
   } else {
-    xclbin_uuid = device.load_xclbin(b_file);
+    xclbin = xrt::xclbin(b_file);
   }
+  auto uuid = device.register_xclbin(xclbin);
+  xrt::hw_context hw_ctx(device, uuid);
   std::vector<xrt::kernel> krnls(num_kernel);
 
   for (int i = 0; i < num_kernel; i++) {
@@ -119,7 +121,7 @@ TestHostMemBandwidthKernel::runTest(const std::shared_ptr<xrt_core::device>& dev
     // compute unit.
     // For such case, this kernel object can only access the specific
     // Compute unit
-    krnls[i] = xrt::kernel(device, xclbin_uuid, krnl_name_full.c_str());
+    krnls[i] = xrt::kernel(hw_ctx, krnl_name_full.c_str());
   }
 
   double max_throughput = 0;
@@ -130,7 +132,7 @@ TestHostMemBandwidthKernel::runTest(const std::shared_ptr<xrt_core::device>& dev
   for (uint32_t a = 4 * 1024; a <= 1 * 1024 * 1024; a *= 2) {
     unsigned int data_size = a;
 
-    if ((std::getenv("XCL_EMULATION_MODE") != nullptr) && (data_size > 8 * 1024))
+    if (xrt_core::utils::is_env("XCL_EMULATION_MODE") && (data_size > 8 * 1024))
       break; // Running only up to 8K for emulation flow
 
     unsigned int vector_size_bytes = data_size;

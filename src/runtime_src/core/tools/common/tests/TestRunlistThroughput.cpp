@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
+
+// ------ I N C L U D E   F I L E S -------------------------------------------
+// Local - Include Files
+#include "TestRunlistThroughput.h"
+#include "TestValidateUtilities.h"
+#include "tools/common/XBUtilities.h"
+#include "core/common/query_requests.h"
+#include "core/common/smi/smi.h"
+#include "xrt/xrt_device.h"
+#include "core/common/runner/runner.h"
+#include "core/common/json/nlohmann/json.hpp"
+#include "core/common/archive.h"
+#include <stdexcept>
+namespace XBU = XBUtilities;
+
+using json = nlohmann::json;
+
+// ----- C L A S S   M E T H O D S -------------------------------------------
+TestRunlistThroughput::TestRunlistThroughput()
+  : TestRunner("runlist-throughput", "Run end-to-end throughput test using runlist")
+{}
+
+double
+TestRunlistThroughput::
+get_runlist_throughput_from_report(const json& report)
+{
+  if (report.contains("executions")) {
+    const auto& execs = report.at("executions");
+    if (!execs.is_array() || execs.size() != 1)
+      throw std::runtime_error("profile_cmd_chain_throughput.json must define exactly one execution");
+
+    return execs.at(0).at("cpu").at("throughput").get<double>();
+  }
+
+  return report.at("cpu").at("throughput").get<double>();
+}
+
+double
+TestRunlistThroughput::
+get_ops_throughput_from_report(const json& report)
+{
+  const auto runlist_throughput = get_runlist_throughput_from_report(report);
+  const auto recipe_runs = report.at("resources").at("runs").get<double>();
+  return runlist_throughput * recipe_runs;
+}
+
+boost::property_tree::ptree
+TestRunlistThroughput::run(const std::shared_ptr<xrt_core::device>& dev, const xrt_core::archive* archive)
+{
+  boost::property_tree::ptree ptree = get_test_header();
+
+  xrt_core::smi::smi_hardware_config smi_hrdw;
+  const auto hardware_type = XBUtilities::get_hardware_type(dev.get());
+  if (smi_hrdw.get_family(hardware_type) == xrt_core::smi::smi_hardware_config::hardware_family::npu3) {
+    XBValidateUtils::logger(ptree, "Details", "N/A");
+    ptree.put("status", XBValidateUtils::test_token_skipped);
+    return ptree;
+  }
+
+  if (archive == nullptr) {
+    ptree.put("status", XBValidateUtils::test_token_failed);
+    XBValidateUtils::logger(ptree, "Error", "No archive found, skipping test");
+    return ptree;
+  }
+
+  try {
+    std::string recipe_data = archive->data("recipe_cmd_chain_throughput.json");
+    std::string profile_data = archive->data("profile_cmd_chain_throughput.json"); 
+    
+    // Extract artifacts using helper method
+    auto artifacts_repo = XBU::extract_artifacts_from_archive(archive, {
+      "validate.xclbin", 
+      "nop.elf" 
+    });    // Create runner with recipe, profile, and artifacts repository
+    xrt_core::runner runner(xrt::device(dev), recipe_data, profile_data, artifacts_repo);
+    runner.execute();
+    runner.wait();
+
+    const auto report = json::parse(runner.get_report());
+    const auto throughput = get_ops_throughput_from_report(report);
+
+    XBValidateUtils::logger(ptree, "Details", boost::str(boost::format("Average throughput: %.1f ops/s") % throughput));
+    ptree.put("status", XBValidateUtils::test_token_passed);
+  }
+  catch (const std::exception& ex) {
+    XBValidateUtils::logger(ptree, "Error", ex.what());
+    ptree.put("status", XBValidateUtils::test_token_failed);
+  }
+
+  return ptree;
+}

@@ -6,6 +6,7 @@
 #include "zocl_util.h"
 #include "zocl_hwctx.h"
 #include "zocl_aie.h"
+#include "zocl_xclbin.h"
 #include <drm/drm_print.h>
 
 int zocl_create_hw_ctx(struct drm_zocl_dev *zdev, struct drm_zocl_create_hw_ctx *drm_hw_ctx, struct drm_file *filp, int slot_id)
@@ -82,10 +83,18 @@ int zocl_destroy_hw_ctx(struct drm_zocl_dev *zdev, struct drm_zocl_destroy_hw_ct
     s_id = kds_hw_ctx->slot_idx;
     ret = kds_free_hw_ctx(client, kds_hw_ctx);
     if (--slot->hwctx_ref_cnt == 0) {
-        if (s_id != 0)
+        /*
+         * Slot 0's AIE device goes away with the libdfx overlay removed
+         * after this ioctl. Detach zocl's pointer only. Releasing the
+         * partition here removes it a second time and oopses.
+         */
+        if (s_id == 0)
+            zocl_detach_aie(slot);
+        else
             zocl_destroy_aie(slot);
         zdev->slot_mask &= ~(1 << s_id);
         DRM_DEBUG("Released the slot %d", s_id);
+        zocl_slot_remove_xclbin_overlay(zdev, slot);
     }
 
 error_out:
@@ -137,9 +146,9 @@ static int zocl_cu_ctx_to_info(struct drm_zocl_dev *zdev, struct drm_zocl_open_c
 done:
     kds_cu_info->ctx = (void *)kds_hw_ctx;
     if (drm_cu_ctx->flags == ZOCL_CTX_EXCLUSIVE)
-        kds_cu_info->flags = ZOCL_CTX_EXCLUSIVE;
+        kds_cu_info->flags = CU_CTX_EXCLUSIVE;
     else
-        kds_cu_info->flags = ZOCL_CTX_SHARED;
+        kds_cu_info->flags = CU_CTX_SHARED;
     return 0;
 }
 
@@ -179,7 +188,7 @@ int zocl_open_cu_ctx(struct drm_zocl_dev *zdev, struct drm_zocl_open_cu_ctx *drm
     }
 
     kds_cu_ctx = kds_alloc_cu_hw_ctx(client, kds_hw_ctx, &kds_cu_info);
-    if (ret) {
+    if (!kds_cu_ctx) {
         DRM_ERROR("%s: Allocation of CU context failed", __func__);
         ret = -EINVAL;
         goto out;

@@ -14,6 +14,8 @@
 #ifdef __cplusplus
 
 #include <map>
+#include <string>
+#include <vector>
 
 // Opaque handle for internal use
 namespace xrt_core {
@@ -55,6 +57,11 @@ public:
   using cfg_param_type = std::map<std::string, uint32_t>;
   using qos_type = cfg_param_type; //alias to old type
 
+  // New Experimental configuration type
+  // Accepts all the keys mentioned in above cfg_param_type but as string values
+  // Accepts key 'name' that can be used to identify the context
+  using cfg_type = std::map<std::string, std::string>;
+
   /**
    * @enum access_mode - legacy access mode
    *
@@ -83,14 +90,14 @@ public:
 
   /**
    * hw_context() - Constructor with QoS control and access control
-   * 
+   *
    * @param device
    *  Device where context is created
    * @param cfg_param
    *  Configuration Parameters (incl. Quality of Service)
    * @param mode
    *  Access control for the context
-   * 
+   *
    * When application uses this constructor no hw resources are allocated
    * It acts as placeholder and is used for setting QoS and access control
    * Applications can later add configuration Elfs using add_config api.
@@ -101,6 +108,38 @@ public:
   hw_context(const xrt::device& device, const cfg_param_type& cfg_param, access_mode mode);
 
   /**
+   * hw_context() - Constructor for default shared access mode
+   */
+  hw_context(const xrt::device& device, const cfg_param_type& cfg_param)
+    : hw_context{device, cfg_param, access_mode::shared}
+  {}
+
+  /**
+   * hw_context() - Constructor with Experimental configuration type and access control
+   *
+   * @param device
+   *  Device where context is created
+   * @param cfg
+   *  Experimental configuration type object
+   * @param mode
+   *  Access control for the context
+   *
+   * When application uses this constructor no hw resources are allocated
+   * It acts as placeholder and is used for setting Experimental configuration
+   * and access control. Applications can later add configuration Elfs using
+   * add_config api.
+   */
+  XRT_API_EXPORT
+  hw_context(const xrt::device& device, const cfg_type& cfg, access_mode mode);
+
+  /**
+   * hw_context() - Constructor for default shared access mode
+   */
+  hw_context(const xrt::device& device, const cfg_type& cfg)
+    : hw_context{device, cfg, access_mode::shared}
+  {}
+      
+      /**
    * hw_context() - Constructor with Elf file
    *
    * @param device
@@ -121,6 +160,39 @@ public:
              const cfg_param_type& cfg_param, access_mode mode);
 
   /**
+   * hw_context() - Constructor for default shared access mode
+   */
+  hw_context(const xrt::device& device, const xrt::elf& elf, const cfg_param_type& cfg_param)
+    : hw_context{device, elf, cfg_param, access_mode::shared}
+  {}
+
+  /**
+   * hw_context() - Constructor with Elf file and Experimental configuration type
+   *
+   * @param device
+   *  Device where context is created
+   * @param elf
+   *  Elf configuration object
+   * @param cfg
+   *  Experimental configuration type object
+   * @param mode
+   *  Access control for the context
+   *
+   * Creates a hw context using the ELF provided.
+   * This function uses the new experimental configuration type to create the context.
+   */
+  XRT_API_EXPORT
+  hw_context(const xrt::device& device, const xrt::elf& elf,
+             const cfg_type& cfg, access_mode mode);
+
+  /**
+   * hw_context() - Constructor for default shared access mode
+   */
+  hw_context(const xrt::device& device, const xrt::elf& elf, const cfg_type& cfg)
+    : hw_context{device, elf, cfg, access_mode::shared}
+  {}
+
+  /**
     * hw_context() - Constructor with Elf file with implied qos and mode
     *
     * @param device
@@ -136,10 +208,10 @@ public:
 
   /**
    * add_config() - adds config Elf file to the context
-   * 
+   *
    * @param elf
    *  XRT Elf object created from config Elf file
-   * 
+   *
    * Adds config Elf to context if it is the first config added
    * If config already exists, it will be added only when configuration matches
    * with existing one else an exception is thrown
@@ -163,6 +235,22 @@ public:
    */
   XRT_API_EXPORT
   hw_context(const xrt::device& device, const xrt::uuid& xclbin_id, const cfg_param_type& cfg_param);
+
+  /**
+   * hw_context() - Constructor with Experimental configuration type
+   *
+   * @param device
+   *  Device where context is created
+   * @param xclbin_id
+   *  UUID of xclbin that should be assigned to HW resources
+   * @param cfg
+   *  Experimental configuration type object
+   *
+   * Creates a hw context using the xclbin provided.
+   * This function uses the new experimental configuration type to create the context.
+   */
+  XRT_API_EXPORT
+  hw_context(const xrt::device& device, const xrt::uuid& xclbin_id, const cfg_type& cfg);
 
   /**
    * hw_context() - Construct with specific access control
@@ -270,6 +358,21 @@ public:
   XRT_API_EXPORT
   std::vector<char>
   get_aie_coredump() const;
+
+  /**
+   * get_aie_coredump_elf() - Returns the coredump of AIE Array as an ELF (e_type = ET_CORE).
+   * Fetches the raw AIE dump blob and packages it into a coredump ELF.
+   * The AIE architecture is derived from the ELF loaded in this context.
+   * Metadata (timestamp, firmware version, device info) is always
+   * embedded and populated internally from the hw_context and device.
+   * This function can throw.
+   *
+   * @return
+   *  ELF bytes of the ET_CORE coredump ELF
+   */
+  XRT_API_EXPORT
+  std::vector<char>
+  get_aie_coredump_elf() const;
 
 public:
   /// @cond

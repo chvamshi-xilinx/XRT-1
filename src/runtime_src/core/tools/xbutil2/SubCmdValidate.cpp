@@ -9,6 +9,7 @@
 #include "core/common/utils.h"
 #include "core/common/query_requests.h"
 #include "core/common/archive.h"
+#include "core/common/info_platform.h"
 #include "core/tools/common/EscapeCodes.h"
 #include "core/tools/common/Process.h"
 #include "tools/common/Report.h"
@@ -36,13 +37,14 @@
 #include "tools/common/tests/TestGemm.h"
 #include "tools/common/tests/TestNPUThroughput.h"
 #include "tools/common/tests/TestNPULatency.h"
-#include "tools/common/tests/TestCmdChainLatency.h"
-#include "tools/common/tests/TestCmdChainThroughput.h"
+#include "tools/common/tests/TestRunlistLatency.h"
+#include "tools/common/tests/TestRunlistThroughput.h"
 #include "tools/common/tests/TestAIEReconfigOverhead.h"
 #include "tools/common/tests/TestTemporalSharingOvd.h"
 #include "tools/common/tests/TestPreemptionOverhead.h"
 #include "tools/common/tests/TestValidateUtilities.h"
 #include "tools/common/tests/TestShimDMABW.h"
+#include "tools/common/tests/TestSanity.h"
 
 namespace XBU = XBUtilities;
 namespace xq = xrt_core::query;
@@ -82,11 +84,17 @@ static const std::string test_token_failed = "FAILED";
 static const std::string test_token_passed = "PASSED";
 
 void
-doesTestExist(const std::string& userTestName, std::vector<std::shared_ptr<TestRunner>>& testNames)
+doesTestExist(const std::string& userTestName, const std::vector<std::shared_ptr<TestRunner>>& testNames)
 {
-  const auto iter = std::find_if( testNames.begin(), testNames.end(),
-    [&userTestName](const std::shared_ptr<TestRunner>& testRunner){ 
-      return userTestName == "all" || userTestName == "quick" || userTestName == testRunner->get_name();
+  if (testNames.empty())
+    throw xrt_core::error("No validate tests are available for this device");
+
+  if (userTestName == "all" || userTestName == "quick")
+    return;
+
+  const auto iter = std::find_if(testNames.begin(), testNames.end(),
+    [&userTestName](const std::shared_ptr<TestRunner>& testRunner) {
+      return userTestName == testRunner->get_name();
     });
 
   if (iter == testNames.end())
@@ -114,12 +122,13 @@ std::vector<std::shared_ptr<TestRunner>> testSuite = {
   std::make_shared<TestGemm>(),
   std::make_shared<TestNPUThroughput>(),
   std::make_shared<TestNPULatency>(),
-  std::make_shared<TestCmdChainLatency>(),
-  std::make_shared<TestCmdChainThroughput>(),
+  std::make_shared<TestRunlistLatency>(),
+  std::make_shared<TestRunlistThroughput>(),
   std::make_shared<TestAIEReconfigOverhead>(),
   std::make_shared<TestTemporalSharingOvd>(),
   std::make_shared<TestPreemptionOverhead>(),
   std::make_shared<TestShimDMABW>(),
+  std::make_shared<TestSanity>(),
 };
 
 /*
@@ -196,7 +205,8 @@ pretty_print_test_run(const boost::property_tree::ptree& test,
   }
   else if (warn) {
     _status.append(" with warnings");
-    status = test_status::warning;
+    if (status != test_status::failed)
+      status = test_status::warning;
   }
 
   boost::to_upper(_status);
@@ -216,8 +226,6 @@ print_status(test_status status, std::ostream & _ostream)
     _ostream << "Validation completed";
   if (status == test_status::warning)
     _ostream << ", but with warnings";
-  if (!XBU::getVerbose())
-    _ostream << ". Please run the command '--verbose' option for more details";
   _ostream << std::endl;
 }
 
@@ -247,7 +255,7 @@ static void
 get_ryzen_platform_info(const std::shared_ptr<xrt_core::device>& device,
                         boost::property_tree::ptree& ptTree)
 {
-  ptTree.put("platform", xrt_core::device_query<xq::rom_vbnv>(device));
+  ptTree.put("platform", xrt_core::platform::get_device_name(device.get()));
   const auto mode = xrt_core::device_query_default<xq::performance_mode>(device, 0);
   ptTree.put("power_mode", xq::performance_mode::parse_status(mode));
 }
@@ -302,7 +310,9 @@ run_test_suite_device( const std::shared_ptr<xrt_core::device>& device,
   if (testObjectsToRun.empty())
     throw std::runtime_error("No test given to validate against.");
 
-  auto test_archive = XBU::open_archive(device.get());
+  // Shared ownership: a test that times out keeps running in a detached thread
+  // which may still be using the archive after this function returns.
+  std::shared_ptr<const xrt_core::archive> test_archive = XBU::open_archive(device.get());
 
   get_platform_info(device, ptDeviceInfo, schemaVersion, std::cout);
   std::cout << "-------------------------------------------------------------------------------" << std::endl;
@@ -312,22 +322,34 @@ run_test_suite_device( const std::shared_ptr<xrt_core::device>& device,
   for (std::shared_ptr<TestRunner> testPtr : testObjectsToRun) {
     auto bdf = xrt_core::device_query<xq::pcie_bdf>(device);
 
-    boost::property_tree::ptree ptTest;
-    pretty_print_test_desc(testPtr, ptTest, test_idx, std::cout, xq::pcie_bdf::to_string(bdf));
-    try {
-      // Call startTest with archive if available, otherwise use standard call; pass iter_count for repeated runs
-      ptTest = test_archive ? testPtr->startTest(device, test_archive.get(), iter_count) : testPtr->startTest(device, nullptr, iter_count);
-    } catch (const std::runtime_error& e) {
-      std::cout << e.what() << std::endl;
-      return test_status::failed;
-    } catch (const std::exception&) {
-      XBValidateUtils::logger(ptTest, "Error", "The test timed out");
-      ptTest.put("status", test_token_failed);
-      status = test_status::failed;
-    }
-    ptDeviceTestSuite.push_back( std::make_pair("", ptTest) );
+    boost::property_tree::ptree ptHeader;
+    pretty_print_test_desc(testPtr, ptHeader, test_idx, std::cout, xq::pcie_bdf::to_string(bdf));
 
-    pretty_print_test_run(ptTest, status, std::cout);
+    for (unsigned int iter = 1; iter <= iter_count; ++iter) {
+      boost::property_tree::ptree ptTest = ptHeader;
+      bool timed_out = false;
+      try {
+        // Archive is null on devices that don't provide one
+        ptTest = testPtr->startTest(device, test_archive);
+      } catch (const std::runtime_error& e) {
+        std::cout << e.what() << std::endl;
+        return test_status::failed;
+      } catch (const std::exception&) {
+        XBValidateUtils::logger(ptTest, "Error", "The test timed out");
+        ptTest.put("status", test_token_failed);
+        status = test_status::failed;
+        timed_out = true;
+      }
+      if (iter_count > 1)
+        XBValidateUtils::logger(ptTest, "Iteration", boost::str(boost::format("%u/%u") % iter % iter_count));
+      ptDeviceTestSuite.push_back( std::make_pair("", ptTest) );
+
+      pretty_print_test_run(ptTest, status, std::cout);
+
+      // A timed out test is still running in a detached thread
+      if (timed_out)
+        break;
+    }
   }
 
   print_status(status, std::cout);
@@ -338,31 +360,34 @@ run_test_suite_device( const std::shared_ptr<xrt_core::device>& device,
   return status;
 }
 
+static boost::property_tree::ptree
+build_validate_json_output(Report::SchemaVersion schema_version,
+                           const std::string& schema_label,
+                           const boost::property_tree::ptree& ptDeviceTested)
+{
+  boost::property_tree::ptree ptRoot;
+  ptRoot.add_child("schema_version", Report::JsonAbi::make_json_header(schema_label));
+  ptRoot.add_child("logical_devices",
+                   Report::JsonAbi::fit_abi_tree(schema_version, ptDeviceTested));
+  return ptRoot;
+}
+
 static bool
 run_tests_on_devices( std::shared_ptr<xrt_core::device> &device,
-                      Report::SchemaVersion schemaVersion,
+                      Report::SchemaVersion schema_version,
+                      const std::string& schema_label,
                       std::vector<std::shared_ptr<TestRunner>>& testObjectsToRun,
                       std::ostream & output,
                       unsigned int iter_count)
 {
-  // -- Root property tree
-  boost::property_tree::ptree ptDevCollectionTestSuite;
-
   // -- Run the various tests and collect the test data
   boost::property_tree::ptree ptDeviceTested;
-  auto has_failures = (run_test_suite_device(device, schemaVersion, testObjectsToRun, ptDeviceTested, iter_count) == test_status::failed);
+  auto has_failures = (run_test_suite_device(device, schema_version, testObjectsToRun, ptDeviceTested, iter_count) == test_status::failed);
 
-  ptDevCollectionTestSuite.put_child("logical_devices", ptDeviceTested);
-
-  // -- Write the formatted output
-  switch (schemaVersion) {
-    case Report::SchemaVersion::json_20202:
-      boost::property_tree::json_parser::write_json(output, ptDevCollectionTestSuite, true /*Pretty Print*/);
-      output << std::endl;
-      break;
-    default:
-      // Do nothing
-      break;
+  if (Report::JsonAbi::valid_user_abi(schema_version)) {
+    const auto ptRoot = build_validate_json_output(schema_version, schema_label, ptDeviceTested);
+    boost::property_tree::json_parser::write_json(output, ptRoot, true /*Pretty Print*/);
+    output << std::endl;
   }
 
   return has_failures;
@@ -417,8 +442,8 @@ SubCmdValidate::handle_errors_and_validate_tests(const boost::program_options::v
   if (vm.count("pmode") && options.m_pmode.empty())
     throw xrt_core::error("Power mode not specified");
 
-  // When json is specified, make sure an accompanying output file is also specified
-   if (vm.count("format") && options.m_output.empty())
+  // Either JSON output selector requires an accompanying output file
+  if ((vm.count("format") || vm.count("json")) && options.m_output.empty())
     throw xrt_core::error("Please specify an output file to redirect the json to");
 
   if (!options.m_output.empty() && !XBU::getForce() && std::filesystem::exists(options.m_output))
@@ -427,12 +452,7 @@ SubCmdValidate::handle_errors_and_validate_tests(const boost::program_options::v
 
   auto testsToRun = options.m_tests_to_run;
   if (testsToRun.empty()) {
-    if (!XBU::getAdvance()) {
-      testsToRun = std::vector<std::string>({"all"});
-    }
-    else {
-      throw xrt_core::error("No test given to validate against.");
-    }
+    testsToRun = std::vector<std::string>({"all"});
   }
   // Validate the user test requests
   for (auto &userTestName : testsToRun) {
@@ -475,7 +495,11 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
   po::variables_map vm;
   SubCmdValidateOptions options;
   try{
-    const auto unrecognized_options = process_arguments(vm, _options, false);
+    // All JSON "hidden" options require --advanced to be accepted on the command line.
+    po::options_description empty_hidden;
+    const po::options_description& hidden_for_parse = XBU::getAdvance() ? m_hiddenOptions : empty_hidden;
+    const auto unrecognized_options = process_arguments(vm, _options, m_commonOptions, hidden_for_parse,
+                                                        m_positionals, m_subOptionOptions, false);
     fill_option_values(vm, options);
 
     if (!unrecognized_options.empty())
@@ -504,7 +528,7 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
   XBU::setElf(options.m_elf);
 
   // -- Process the options --------------------------------------------
-  Report::SchemaVersion schemaVersion = Report::SchemaVersion::unknown;    // Output schema version
+  Report::SchemaVersion schema_version = Report::SchemaVersion::unknown;
   std::vector<std::string> param;
   std::vector<std::string> validatedTests;
   std::string validateXclbinPath = options.m_xclbin_path;
@@ -523,13 +547,17 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
   auto tests = xrt_core::device_query<xq::xrt_smi_lists>(device, xq::xrt_smi_lists::type::validate_tests);
   auto testOptions = getTestList(tests);
 
+  const bool json_platform = vm.count("json") || m_json_abi_platform;
+  const std::string schema_label = json_platform
+    ? (options.m_json.empty() ? "default" : options.m_json)
+    : options.m_format;
   try {
-    // Output Format
-    schemaVersion = Report::getSchemaDescription(options.m_format).schemaVersion;
-    if (schemaVersion == Report::SchemaVersion::unknown)
-      throw xrt_core::error((boost::format("Unknown output format: '%s'") % options.m_format).str());
+    schema_version = Report::resolve_json_abi(json_platform, vm.count("json") || vm.count("format"), schema_label);
+    if (schema_version == Report::SchemaVersion::unknown)
+      throw xrt_core::error((boost::format("Unknown JSON ABI version: '%s'") % schema_label).str());
+
     // All Error Handling for xrt-smi validate should go here
-    handle_errors_and_validate_tests(vm, options, testOptions, validatedTests, param); 
+    handle_errors_and_validate_tests(vm, options, testOptions, validatedTests, param);
 
     // check if xclbin folder path is provided
     if (!validateXclbinPath.empty()) {
@@ -543,7 +571,7 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
     }
   } catch (const xrt_core::error& e) {
     // Catch only the exceptions that we have generated earlier
-    std::cerr << boost::format("ERROR: %s\n") % e.what();
+    XBU::print_exception(e);
     printHelp();
     throw xrt_core::error(std::errc::operation_canceled);
   }
@@ -637,7 +665,7 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
   }
   // -- Run the tests --------------------------------------------------
   std::ostringstream oSchemaOutput;
-  bool has_failures = run_tests_on_devices(device, schemaVersion, testObjectsToRun, oSchemaOutput, options.m_iter);
+  bool has_failures = run_tests_on_devices(device, schema_version, schema_label, testObjectsToRun, oSchemaOutput, options.m_loop);
 
   try {
     //reset pmode
@@ -660,7 +688,7 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
 
     fOutput << oSchemaOutput.str();
 
-    std::cout << boost::format("Successfully wrote the %s file: %s") % options.m_format % options.m_output << std::endl;
+    std::cout << boost::format("Successfully wrote the JSON file: %s") % options.m_output << std::endl;
   }
 
   if (has_failures == true)
@@ -670,13 +698,14 @@ SubCmdValidate::execute(const SubCmdOptions& _options) const
 void SubCmdValidate::fill_option_values(const po::variables_map& vm, SubCmdValidateOptions& options) const
 {
   options.m_device = vm.count("device") ? vm["device"].as<std::string>() : "";
-  options.m_format = vm.count("format") ? vm["format"].as<std::string>() : "JSON";
+  options.m_format = vm.find("format") != vm.end() ? vm["format"].as<std::string>() : "JSON";
+  options.m_json = vm.find("json") != vm.end() ? vm["json"].as<std::string>() : "default";
   options.m_output = vm.count("output") ? vm["output"].as<std::string>() : "";
   options.m_param = vm.count("param") ? vm["param"].as<std::string>() : "";
   options.m_xclbin_path = vm.count("path") ? vm["path"].as<std::string>() : "";
   options.m_pmode = vm.count("pmode") ? vm["pmode"].as<std::string>() : "";
   options.m_tests_to_run = vm.count("run") ? vm["run"].as<std::vector<std::string>>() : std::vector<std::string>();
-  options.m_iter = vm.count("iter") ? static_cast<unsigned int>(std::stoul(vm["iter"].as<std::string>())) : 1;
+  options.m_loop = vm.count("loop") ? static_cast<unsigned int>(std::stoul(vm["loop"].as<std::string>())) : 1;
   options.m_help = vm.count("help") ? vm["help"].as<bool>() : false;
   options.m_elf = vm.count("elf") ? vm["elf"].as<bool>() : false;
 }
@@ -688,6 +717,8 @@ SubCmdValidate::setOptionConfig(const boost::property_tree::ptree &config)
   try{
     m_jsonConfig.addProgramOptions(m_commonOptions, "common", getName());
     m_jsonConfig.addProgramOptions(m_hiddenOptions, "hidden", getName());
+    m_json_abi_platform = m_jsonConfig.has_option(getName(), "json")
+                     && !m_jsonConfig.has_option(getName(), "format");
   } 
   catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;

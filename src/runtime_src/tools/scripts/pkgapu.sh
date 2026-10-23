@@ -1,8 +1,8 @@
 #!/bin/bash
-#
+
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2021-2022 Xilinx, Inc. All rights reserved.
-# Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.
-#
+# Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 # This script creates rpm and deb packages for Versal APU firmware and Built-in PS Kernels.
 # The firmware file (.xsabin) is installed to /lib/firmware/xilinx
@@ -166,10 +166,6 @@ PACKAGE_DIR="$BUILD_DIR"
 FW_FILE="$BUILD_DIR/lib/firmware/xilinx/xrt-versal-apu.xsabin"
 INSTALL_ROOT="$BUILD_DIR/lib"
 SDK="$BUILD_DIR/lib/firmware/xilinx/sysroot/sdk.sh"
-
-THIS_SCRIPT_DIR="$( cd "$( dirname "${THIS_SCRIPT}" )" >/dev/null 2>&1 && pwd )"
-VITIS_FILE="${THIS_SCRIPT_DIR}/vitis.build"
-source $VITIS_FILE
 
 if [[ $clean == 1 ]]; then
 	echo $PWD

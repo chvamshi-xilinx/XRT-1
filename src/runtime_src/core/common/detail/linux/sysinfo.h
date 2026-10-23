@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
+
+// Local - Include Files
+#include "core/common/error.h"
 
 // 3rd Party Library - Include Files
 #include <boost/property_tree/ptree.hpp>
@@ -7,9 +10,12 @@
 #include <boost/property_tree/ini_parser.hpp>
 
 // System - Include Files
+#include <cerrno>
 #include <gnu/libc-version.h>
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
 #include <thread>
+#include <unistd.h>
 
 #if defined(__aarch64__) || defined(__arm__) || defined(__mips__)
   #define MACHINE_NODE_PATH "/proc/device-tree/model"
@@ -127,10 +133,21 @@ get_os_info(boost::property_tree::ptree &pt)
   pt.put("processor", processor_name());
 }
 
+std::pair<unsigned int, unsigned int>
+get_terminal_size()
+{
+  struct winsize ws{};
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg) ioctl is the only portable way to query terminal size
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0 || ws.ws_col == 0)
+    throw xrt_core::error(errno, "Unable to determine terminal size");
+
+  return {static_cast<unsigned int>(ws.ws_row), static_cast<unsigned int>(ws.ws_col)};
+}
+
 bool
 is_advanced()
 {
-  return true; //TODO: implement Linux side
+  return false; //TODO: remove once Windows side is removed
 }
 
 } //xrt_core::sysinfo

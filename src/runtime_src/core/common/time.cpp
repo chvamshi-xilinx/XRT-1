@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2016-2017 Xilinx, Inc. All rights reserved.
-// Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 #define XRT_CORE_COMMON_SOURCE
 #include "time.h"
 #include "detail/systime.h" // after time.h, order matters
@@ -11,9 +11,6 @@
 #include <iomanip>
 #include <sstream>
 
-#ifdef _WIN32
-# pragma warning ( disable : 4996 )
-#endif
 namespace {
 
 static std::tm
@@ -64,9 +61,12 @@ timestamp()
 std::string
 timestamp(uint64_t epoch)
 {
-  time_t rawtime = epoch;
-  std::string tmp(ctime(&rawtime));
-  return tmp.substr( 0, tmp.length() -1).append(" GMT");
+  std::time_t rawtime = static_cast<std::time_t>(epoch);
+
+  std::tm tm = get_gmtime(rawtime);
+  std::ostringstream os;
+  os << std::put_time(&tm, "%a %b %d %H:%M:%S %Y GMT");
+  return os.str();
 }
 
 // returns formatted timestamp string that can be concatenated with
@@ -94,6 +94,22 @@ get_timestamp_for_filename()
   std::stringstream time_stamp;
   time_stamp << std::put_time(&tm_buf, "%Y-%m-%d_%H-%M-%S")
              << '-' << std::setfill('0') << std::setw(microsecond_width) << us.count();
+  return time_stamp.str();
+}
+
+// returns uc log formatted timestamp "seconds.nanoseconds"
+std::string
+get_timestamp_for_uc_log(uint64_t epoch_ns)
+{
+  constexpr uint64_t nanoseconds_per_second = 1000000000;
+  constexpr int nanoseconds_width = 9;
+
+  uint64_t seconds = epoch_ns / nanoseconds_per_second;
+  uint64_t nanoseconds = epoch_ns % nanoseconds_per_second;
+
+  std::stringstream time_stamp;
+  time_stamp << seconds << '.'
+             << std::setfill('0') << std::setw(nanoseconds_width) << nanoseconds;
   return time_stamp.str();
 }
 

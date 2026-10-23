@@ -23,6 +23,7 @@
 # include <cstdint>
 # include <functional>
 # include <memory>
+# include <type_traits>
 # include <vector>
 #endif
 
@@ -484,10 +485,28 @@ public:
    * See also ``operator()`` to set all arguments and start kernel.
    */
   template <typename ArgType>
-  void
+  std::enable_if_t<!std::is_base_of_v<xrt::bo, std::decay_t<ArgType>>>
   set_arg(int index, ArgType&& arg)
   {
     set_arg_at_index(index, &arg, sizeof(arg));
+  }
+
+  /**
+   * set_arg() - Set a specific kernel global argument for a run
+   *
+   * @param index
+   *  Index of kernel argument to set
+   * @param boh
+   *  Any xrt::bo or subclass (e.g. xrt::ext::bo) argument value to set.
+   *
+   * This overload catches xrt::bo subclasses that would otherwise be
+   * treated as scalars by the generic template.
+   */
+  template <typename ArgType>
+  std::enable_if_t<std::is_base_of_v<xrt::bo, std::decay_t<ArgType>>>
+  set_arg(int index, ArgType&& boh)
+  {
+    set_arg_at_index(index, static_cast<const xrt::bo&>(boh));
   }
 
   /**
@@ -795,6 +814,7 @@ public:
    * other kernels and other process will have shared access to same
    * compute units.
    */
+  [[deprecated("deprecated, please use kernel(hw_context, name) instead")]]
   XRT_API_EXPORT
   kernel(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& name,
          cu_access_mode mode = cu_access_mode::shared);
@@ -807,14 +827,13 @@ public:
   /// @endcond
 
   /// @cond
-  /// Deprecated construtor for exclusive access
-  kernel(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& name, bool ex)
-    : kernel(device, xclbin_id, name, ex ? cu_access_mode::exclusive : cu_access_mode::shared)
-  {}
+  /// Deprecated constructor for exclusive access
+  kernel(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& name, bool ex);
 
   /**
    * Obsoleted construction from xclDeviceHandle
    */
+  [[deprecated("deprecated, please use kernel(hw_context, name) instead")]]
   XRT_API_EXPORT
   kernel(xclDeviceHandle dhdl, const xrt::uuid& xclbin_id, const std::string& name,
          cu_access_mode mode = cu_access_mode::shared);
@@ -924,6 +943,20 @@ public:
   XRT_API_EXPORT
   xrt::xclbin
   get_xclbin() const;
+
+  /**
+   * operator < () - Weak ordering
+   *
+   * @param rhs
+   *  Object to compare with
+   * @return
+   *  True if object is ordered less that compared with other
+   */
+  bool
+  operator < (const xrt::kernel& rhs) const
+  {
+    return handle < rhs.handle;
+  }
 
 public:
   /// @cond

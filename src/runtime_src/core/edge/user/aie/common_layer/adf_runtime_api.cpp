@@ -43,7 +43,17 @@ static constexpr int AIE_ML_ASYNC_REL = 1;
 static constexpr int AIE_ML_ASYNC_ACQ = -1; //negative lock value -> acquire_greater_equal
 static constexpr int AIE_ML_ASYNC_ACQ_FIRST_TIME = 0;
 static constexpr unsigned LOCK_TIMEOUT = 0x7FFFFFFF;
+static constexpr unsigned LOCK_TIMEOUT_NB = 0; // non-blocking RTP lock acquire
 
+static int
+undoLockAcquire(XAie_DevInst* dev, XAie_LocType tile, unsigned short lockId, int8_t acqVal)
+{
+    int8_t undoVal = acqVal;
+    if (acqVal != XAIE_LOCK_WITH_NO_VALUE && dev->DevProp.DevGen >= XAIE_DEV_GEN_AIEML)
+        undoVal = -acqVal;
+
+    return XAie_LockRelease(dev, tile, XAie_LockInit(lockId, undoVal), LOCK_TIMEOUT);
+}
 
 /********************************* config_manager *************************************/
 
@@ -61,6 +71,7 @@ graph_api(const graph_config* pConfig, const std::shared_ptr<config_manager> cfg
   : pGraphConfig(pConfig)
   , isConfigured(false)
   , isRunning(false)
+  , isInfiniteRun(false)
   , startTime(0)
   , config(std::move(cfg))
 {}
@@ -169,6 +180,12 @@ err_code graph_api::run(int iterations)
     if (driverStatus != AieRC::XAIE_OK)
         return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::run: AIE driver error.");
 
+    // A negative iteration count makes the core(s) loop forever, so they never
+    // set the done bit and the core-done handshake in wait()/end() can never
+    // complete. Remember it so those APIs terminate the graph instead of
+    // polling for a done bit that never arrives.
+    isInfiniteRun = (iterations < 0);
+
     return run();
 }
 
@@ -179,9 +196,18 @@ err_code graph_api::wait()
 
     int driverStatus = AieRC::XAIE_OK; //0
 
+    int numCores = coreTiles.size();
+
+    if (isInfiniteRun)
+    {
+        for (int i = 0; i < numCores; i++)
+            if (!pGraphConfig->triggered[i])
+                return errorMsg(err_code::user_error, "ERROR: adf::graph::wait: graph '" + pGraphConfig->name
+                    + "' was started with an infinite iteration count and never finishes. Use wait(cycle_timeout) or end(cycle_timeout).");
+    }
+
     infoMsg("Waiting for core(s) of graph " + pGraphConfig->name + " to finish execution ...");
 
-    int numCores = coreTiles.size();
     for (int i = 0; i < numCores; i++)
     {
         if (!pGraphConfig->triggered[i])
@@ -235,6 +261,7 @@ err_code graph_api::wait(unsigned long long cycleTimeout)
         return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::wait: AIE driver error.");
 
     isRunning = false;
+    isInfiniteRun = false; //core(s) have been disabled by the cycle timeout
     return err_code::ok;
 }
 
@@ -271,6 +298,31 @@ err_code graph_api::end()
         return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::end: graph is not configured.");
 
     int driverStatus = AieRC::XAIE_OK; //0
+
+    // A graph started with an infinite iteration count keeps its core(s) inside
+    // the iteration loop, so they never reach the end-signal check and never
+    // report done. Terminate it the same way end(cycle_timeout) does once its
+    // cycle wait expires: disable the core(s), then set the end signal.
+    if (isRunning && isInfiniteRun)
+    {
+        infoMsg("Terminating free-running graph " + pGraphConfig->name);
+
+        int numCores = coreTiles.size();
+        for (int i = 0; i < numCores; i++)
+        {
+            driverStatus |= XAie_CoreDisable(config->get_dev(), coreTiles[i]);
+            //set the end signal in sync_buffer[0] (which is 4 byte before iteration address)
+            driverStatus |= XAie_DataMemWrWord(config->get_dev(), iterMemTiles[i], pGraphConfig->iterMemAddrs[i] - 4, (u32)1);
+        }
+
+        isRunning = false;
+        isInfiniteRun = false;
+
+        if (driverStatus != AieRC::XAIE_OK)
+            return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::end: AIE driver error.");
+
+        return err_code::ok;
+    }
 
     bool isRunningBefore = isRunning;
     err_code ret = wait(); //wait core done. //wait() sets isRunning to false
@@ -546,6 +598,7 @@ err_code graph_api::update(const rtp_config* pRTPConfig, const void* pValue, siz
 
     if (pRTPConfig->hasLock && bAcquireLock && !pRTPConfig->blocking)
         driverStatus |= XAie_LockAcquire(config->get_dev(), selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, selAcqVal), LOCK_TIMEOUT);
+
     // write the new selector value
     driverStatus |= XAie_DataMemWrWord(config->get_dev(), selectorTile, pRTPConfig->selectorAddr, selector);
 
@@ -571,6 +624,160 @@ err_code graph_api::update(const rtp_config* pRTPConfig, const void* pValue, siz
 
     if (driverStatus != AieRC::XAIE_OK)
         return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::update: XAieTile_LockAcquire timeout or AIE driver error.");
+
+    return err_code::ok;
+}
+
+err_code graph_api::update_nb(const rtp_config* pRTPConfig, const void* pValue, size_t numBytes)
+{
+    ///////////////////////////// Error Checking //////////////////////////////
+
+    err_code ret = checkRTPConfigForUpdate(pRTPConfig, pGraphConfig, numBytes, isRunning);
+    if (ret != err_code::ok)
+        return ret;
+
+    ///////////////////////////// Configuration //////////////////////////////
+
+    size_t numReservedRows = config->get_num_reserved_rows();
+    XAie_LocType selectorTile = XAie_TileLoc(pRTPConfig->selectorColumn, pRTPConfig->selectorRow + numReservedRows + 1);
+    XAie_LocType pingTile = XAie_TileLoc(pRTPConfig->pingColumn, pRTPConfig->pingRow + numReservedRows + 1);
+    XAie_LocType pongTile = XAie_TileLoc(pRTPConfig->pongColumn, pRTPConfig->pongRow + numReservedRows + 1);
+
+    // Do NOT lock async RTP when graph is suspended; otherwise, it may deadlock. We don't support synchronous RTP in suspended mode
+    bool bAcquireLock = !(pRTPConfig->isAsync && !isRunning);
+
+    int8_t acquireVal = (pRTPConfig->isAsync ? XAIE_LOCK_WITH_NO_VALUE : ACQ_WRITE); //Versal
+    int8_t selAcqVal  = acquireVal;
+    int8_t bufAcqVal  = acquireVal;
+
+    int8_t releaseVal = REL_READ; //Versal
+    bool relSelLock = true;
+    bool relBufLock = true;
+
+    // defer asyncRtpUpdateTimes increment until the whole update succeeds
+    bool bCountThisUpdate = false;
+
+    if (config->get_dev()->DevProp.DevGen == XAIE_DEV_GEN_AIEML || config->get_dev()->DevProp.DevGen == XAIE_DEV_GEN_AIE2PS) //modification to accommodate AIEML semaphore
+    {
+        if (pRTPConfig->isAsync)
+        {
+            int rtpUpdateTimes = asyncRtpUpdateTimes[pRTPConfig->portId];
+            if (rtpUpdateTimes == 0)
+            {
+                selAcqVal = AIE_ML_ASYNC_ACQ_FIRST_TIME;
+                bufAcqVal = AIE_ML_ASYNC_ACQ_FIRST_TIME;
+
+                // For the first RTP update, release both the locks even if they are not acquired.
+                // Otherwise, the kernel won't be able to acquire the lock.
+                relSelLock = true;
+                relBufLock = true;
+
+                bCountThisUpdate = true;
+            }
+            else if (rtpUpdateTimes == 1)
+            {
+                selAcqVal = AIE_ML_ASYNC_ACQ;
+                relSelLock = bAcquireLock;
+                if (pRTPConfig->pingLockId == pRTPConfig->pongLockId) //single buffer
+                {
+                    bufAcqVal = AIE_ML_ASYNC_ACQ;
+                    relBufLock = bAcquireLock;
+                }
+                else
+                {
+                    bufAcqVal = AIE_ML_ASYNC_ACQ_FIRST_TIME; //double buffer, second update call to pong buffer, still first time for pong buffer lock
+                    relBufLock = true; // for pong, its the first update. Hence, release the lock.
+                }
+
+                bCountThisUpdate = true;
+            }
+            else // rtpUpdateTimes>=2
+            {
+                selAcqVal = AIE_ML_ASYNC_ACQ;
+                bufAcqVal = AIE_ML_ASYNC_ACQ;
+
+                // release the locks only if they are acquired. Otherwise, it can result in lock value overflow.
+                relSelLock = bAcquireLock;
+                relBufLock = bAcquireLock;
+            }
+        }
+    }
+
+    ///////////////////////////// RTP update operation //////////////////////////////
+
+    infoMsg("Updating RTP value to port " + pRTPConfig->portName);
+
+    XAie_DevInst* dev = config->get_dev();
+    bool acqLock = pRTPConfig->hasLock && bAcquireLock;
+    bool selectorLockHeld = false;
+    int driverStatus = AieRC::XAIE_OK; //0
+
+    // sync ports acquire selector lock for WRITE, async ports acquire selector lock unconditionally
+    if (acqLock && pRTPConfig->blocking)
+    {
+        if (XAie_LockAcquire(dev, selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, selAcqVal), LOCK_TIMEOUT_NB) != AieRC::XAIE_OK)
+            return err_code::resource_unavailable;
+
+        selectorLockHeld = true;
+    }
+
+    // Read the selector value
+    u32 selector;
+    driverStatus |= XAie_DataMemRdWord(dev, selectorTile, pRTPConfig->selectorAddr, ((u32*)&selector));
+    selector = 1 - selector;
+
+    XAie_LocType bufferTile = (selector == 1 ? pongTile : pingTile);
+    unsigned short bufferLockId = (selector == 1 ? pRTPConfig->pongLockId : pRTPConfig->pingLockId);
+    size_t bufferAddr = (selector == 1 ? pRTPConfig->pongAddr : pRTPConfig->pingAddr);
+
+    // sync ports acquire buffer lock for WRITE, async ports acquire buffer lock unconditionally
+    if (acqLock)
+    {
+        if (XAie_LockAcquire(dev, bufferTile, XAie_LockInit(bufferLockId, bufAcqVal), LOCK_TIMEOUT_NB) != AieRC::XAIE_OK)
+        {
+            if (selectorLockHeld)
+                undoLockAcquire(dev, selectorTile, pRTPConfig->selectorLockId, selAcqVal);
+
+            return err_code::resource_unavailable;
+        }
+    }
+
+    driverStatus |= XAie_DataMemBlockWrite(dev, bufferTile, bufferAddr, pValue, numBytes);
+
+    if (acqLock && !pRTPConfig->blocking)
+    {
+        if (XAie_LockAcquire(dev, selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, selAcqVal), LOCK_TIMEOUT_NB) != AieRC::XAIE_OK)
+        {
+            // undo buffer lock only; selector not updated yet
+            undoLockAcquire(dev, bufferTile, bufferLockId, bufAcqVal);
+
+            return err_code::resource_unavailable;
+        }
+    }
+
+    // write the new selector value
+    driverStatus |= XAie_DataMemWrWord(dev, selectorTile, pRTPConfig->selectorAddr, selector);
+
+    if (pRTPConfig->hasLock)
+    {
+        // release selector and buffer locks for ME
+        // still need to release async RTP selector lock FOR_READ even when the graph is suspended;
+        // otherwise, the ME side may deadlock in acquiring selector lock FOR_READ
+        if (relSelLock)
+            driverStatus |= XAie_LockRelease(dev, selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, releaseVal), LOCK_TIMEOUT);
+
+        // still need to release async RTP buffer lock FOR_READ even when the graph is suspended;
+        // otherwise, the AIE side may deadlock in acquiring buffer lock FOR_READ
+        // (note that there is one selector lock but two buffer locks)
+        if (relBufLock)
+            driverStatus |= XAie_LockRelease(dev, bufferTile, XAie_LockInit(bufferLockId, releaseVal), LOCK_TIMEOUT);
+    }
+
+    if (driverStatus != AieRC::XAIE_OK)
+        return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::update_nb: AIE driver error.");
+
+    if (bCountThisUpdate)
+        asyncRtpUpdateTimes[pRTPConfig->portId]++;
 
     return err_code::ok;
 }
@@ -680,6 +887,82 @@ err_code graph_api::read(const rtp_config* pRTPConfig, void* pValue, size_t numB
         return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::read: XAieTile_LockAcquire timeout or AIE driver error.");
 
      return err_code::ok;
+}
+
+err_code graph_api::read_nb(const rtp_config* pRTPConfig, void* pValue, size_t numBytes)
+{
+    ///////////////////////////// Error Checking //////////////////////////////
+
+    err_code ret = checkRTPConfigForRead(pRTPConfig, pGraphConfig, numBytes);
+    if (ret != err_code::ok)
+        return ret;
+
+    ///////////////////////////// Configuration //////////////////////////////
+
+    // Do NOT lock async RTP when graph is suspended; otherwise, it may deadlock. We don't support synchronous RTP in suspended mode
+    bool bHasAndAcquireLock = !(pRTPConfig->isAsync && !isRunning) && pRTPConfig->hasLock;
+
+    int8_t acquireVal = ACQ_READ; //Versal
+    int8_t releaseVal = (pRTPConfig->isAsync ? REL_READ : REL_WRITE); //Versal
+
+    size_t numReservedRows = config->get_num_reserved_rows();
+    XAie_LocType selectorTile = XAie_TileLoc(pRTPConfig->selectorColumn, pRTPConfig->selectorRow + numReservedRows + 1);
+    XAie_LocType pingTile = XAie_TileLoc(pRTPConfig->pingColumn, pRTPConfig->pingRow + numReservedRows + 1);
+    XAie_LocType pongTile = XAie_TileLoc(pRTPConfig->pongColumn, pRTPConfig->pongRow + numReservedRows + 1);
+
+    if (config->get_dev()->DevProp.DevGen == XAIE_DEV_GEN_AIEML || config->get_dev()->DevProp.DevGen == XAIE_DEV_GEN_AIE2PS) //modification to accommodate AIEML semaphore
+    {
+        if (pRTPConfig->isAsync)
+            acquireVal = AIE_ML_ASYNC_ACQ;
+        else
+            releaseVal = AIE_ML_REL_WRITE;
+    }
+
+    ///////////////////////////// RTP read operation //////////////////////////////
+
+    infoMsg("Reading RTP value from port " + pRTPConfig->portName);
+
+    XAie_DevInst* dev = config->get_dev();
+    int driverStatus = AieRC::XAIE_OK; //0
+
+    // synchronous RTP acquires lock for READ, async RTP requiring first-time sync acquires lock for READ
+    if (bHasAndAcquireLock)
+    {
+        if (XAie_LockAcquire(dev, selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, acquireVal), LOCK_TIMEOUT_NB) != AieRC::XAIE_OK)
+            return err_code::resource_unavailable;
+    }
+
+    // Read the selector value
+    u32 selector;
+    driverStatus |= XAie_DataMemRdWord(dev, selectorTile, pRTPConfig->selectorAddr, ((u32*)&selector));
+
+    XAie_LocType bufferTile = (selector == 1 ? pongTile : pingTile);
+    unsigned short bufferLockId = (selector == 1 ? pRTPConfig->pongLockId : pRTPConfig->pingLockId);
+    size_t bufferAddr = (selector == 1 ? pRTPConfig->pongAddr : pRTPConfig->pingAddr);
+
+    if (bHasAndAcquireLock)
+    {
+        // synchronous RTP acquires buffer for READ, async RTP requiring first-time sync acquires lock for READ
+        if (XAie_LockAcquire(dev, bufferTile, XAie_LockInit(bufferLockId, acquireVal), LOCK_TIMEOUT_NB) != AieRC::XAIE_OK)
+        {
+            undoLockAcquire(dev, selectorTile, pRTPConfig->selectorLockId, acquireVal);
+            return err_code::resource_unavailable;
+        }
+
+        // synchronous RTP releases lock for WRITE, async RTP requiring first-time sync release lock for READ
+        driverStatus |= XAie_LockRelease(dev, selectorTile, XAie_LockInit(pRTPConfig->selectorLockId, releaseVal), LOCK_TIMEOUT);
+    }
+
+    driverStatus |= XAie_DataMemBlockRead(dev, bufferTile, bufferAddr, pValue, numBytes);
+
+    //release buffer lock
+    if (bHasAndAcquireLock)
+        driverStatus |= XAie_LockRelease(dev, bufferTile, XAie_LockInit(bufferLockId, releaseVal), LOCK_TIMEOUT);
+
+    if (driverStatus != AieRC::XAIE_OK)
+        return errorMsg(err_code::aie_driver_error, "ERROR: adf::graph::read_nb: AIE driver error.");
+
+    return err_code::ok;
 }
 
 

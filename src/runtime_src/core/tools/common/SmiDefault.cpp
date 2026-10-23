@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 // Local - Include Files
 
 #define XRT_CORE_COMMON_SOURCE
 
-#include "core/common/smi.h"
+#include "core/common/smi/smi.h"
 #include "SmiDefault.h"
 
 #include <boost/property_tree/ptree.hpp>
@@ -26,7 +26,7 @@ create_validate_subcommand()
   validate_suboptions.emplace("device", std::make_shared<xrt_core::smi::option>("device", "d", "The Bus:Device.Function (e.g., 0000:d8:00.0) device of interest", "common", "", "string"));
   validate_suboptions.emplace("format", std::make_shared<xrt_core::smi::option>("format", "f", "Report output format. Valid values are:\n"
                                 "\tJSON        - Latest JSON schema\n"
-                                "\tJSON-2020.2 - JSON 2020.2 schema", "common", "JSON", "string"));
+                                "\tJSON-2020.2 - JSON 2020.2 schema (legacy)", "common", "JSON", "string"));
   validate_suboptions.emplace("output", std::make_shared<xrt_core::smi::option>("output", "o", "Direct the output to the given file", "common", "", "string"));
   validate_suboptions.emplace("help", std::make_shared<xrt_core::smi::option>("help", "h", "Help to use this sub-command", "common", "", "none"));
   validate_suboptions.emplace("run", std::make_shared<xrt_core::smi::option>("run", "r", "Run a subset of the test suite\n",
@@ -39,7 +39,7 @@ xrt_core::smi::subcommand
 create_examine_subcommand() 
 {
   std::vector<xrt_core::smi::basic_option> examine_report_desc = {
-    {"host", "Host information", "common"},
+    {"host", "Host information (default)", "common"},
   };
   std::map<std::string, std::shared_ptr<xrt_core::smi::option>> examine_suboptions; 
   examine_suboptions.emplace("device", std::make_shared<xrt_core::smi::option>("device", "d", "The Bus:Device.Function (e.g., 0000:d8:00.0) device of interest", "common", "", "string"));
@@ -60,6 +60,18 @@ create_configure_subcommand()
   return {"configure", "Device and host configuration", "common", std::move(configure_suboptions)};
 }
 
+xrt_core::smi::subcommand
+create_reset_subcommand()
+{
+  std::map<std::string, std::shared_ptr<xrt_core::smi::option>> reset_suboptions;
+  reset_suboptions.emplace("device", std::make_shared<xrt_core::smi::option>("device", "d", "The Bus:Device.Function (e.g., 0000:d8:00.0) device of interest", "common", "", "string"));
+  reset_suboptions.emplace("type", std::make_shared<xrt_core::smi::option>("type", "t", "The type of reset to perform. Types resets available:\n"
+                            "  user         - Hot reset (default)\n", "common", "user", "string"));
+  reset_suboptions.emplace("help", std::make_shared<xrt_core::smi::option>("help", "h", "Help to use this sub-command", "common", "", "none"));
+
+  return {"reset", "Resets the given device", "common", std::move(reset_suboptions)};
+}
+
 std::string 
 get_default_smi_config() 
 {
@@ -67,6 +79,7 @@ get_default_smi_config()
   smi_instance->add_subcommand("validate", create_validate_subcommand());
   smi_instance->add_subcommand("examine", create_examine_subcommand());
   smi_instance->add_subcommand("configure", create_configure_subcommand());
+  smi_instance->add_subcommand("reset", create_reset_subcommand());
 
   return smi_instance->build_json();
 }
